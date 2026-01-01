@@ -1,10 +1,13 @@
-import fetch from "node-fetch";
+import fetch from 'node-fetch';
 
-export default async function fetchUrl(url: string): Promise<number | null> {
+export default async function fetchUrl(url: string): Promise<string | null> {
   try {
     const response = await fetch(url);
-    console.log(`Status for ${url}:`, response.status);
-    return response.status;
+    if (!response.ok) {
+      throw new Error(`Failed to fetch ${url}: ${response.statusText}`);
+    }
+    const html = await response.text();
+    return html;
   } catch (error) {
     console.error(`Error fetching ${url}:`, error);
     return null;
