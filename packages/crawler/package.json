@@ -1,0 +1,11 @@
+{   
+    "name": "@link-sentry/crawler",
+    "version": "0.0.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "tsx src/index.ts",
+        "typecheck": "tsc --noEmit"
+
+    }
+}
