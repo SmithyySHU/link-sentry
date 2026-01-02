@@ -1,29 +1,22 @@
-import { crawlPage } from "./index.js";
+import { runScanForSite } from "./scanService.js";
 
 async function main(): Promise<void> {
   const [siteId, startUrl] = process.argv.slice(2);
 
   if (!siteId || !startUrl) {
-    console.error(
-      "Usage: npm run scan:once -- <siteId> <startUrl>"
-    );
+    console.error("Usage: npm run scan:once -- <siteId> <startUrl>");
     process.exit(1);
   }
 
-  try {
-    const summary = await crawlPage(siteId, startUrl);
+  console.log(`Starting scan for site ${siteId}`);
+  console.log(`Start URL: ${startUrl}`);
 
-    console.log("");
-    console.log("Scan complete.");
-    console.log(`scan_run_id: ${summary.scanRunId}`);
-    console.log(`total:       ${summary.totalLinks}`);
-    console.log(`checked:     ${summary.checkedLinks}`);
-    console.log(`broken:      ${summary.brokenLinks}`);
-    console.log(`skipped:     ${summary.skippedLinks}`);
-  } catch (err) {
-    console.error("Scan failed:", err);
-    process.exit(1);
-  }
+  const summary = await runScanForSite(siteId, startUrl);
+
+  console.log("Scan completed.");
+  console.log(
+    `Run: ${summary.scanRunId}, total=${summary.totalLinks}, checked=${summary.checkedLinks}, broken=${summary.brokenLinks}`
+  );
 }
 
 await main();

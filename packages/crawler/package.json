@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --import tsx src/index.ts",
+    "dev": "node --import tsx src/runSingleScan.ts 85efa142-35dc-4b06-93ee-fb7180ab28fd https://twiddlefood.co.uk",
     "scan:once": "node --import tsx src/runSingleScan.ts",
     "typecheck": "tsc --noEmit"
   },

@@ -1,4 +1,5 @@
 import { Client } from "pg";
+import { DATABASE_URL } from "./env.js";
 let client = null;
 let connecting = null;
 export async function ensureConnected() {
@@ -6,10 +7,7 @@ export async function ensureConnected() {
         return client;
     if (connecting)
         return connecting;
-    const url = process.env.DATABASE_URL;
-    if (!url) {
-        throw new Error("Missing DATABASE_URL in environment.");
-    }
+    const url = DATABASE_URL;
     const c = new Client({ connectionString: url });
     connecting = c
         .connect()
@@ -21,4 +19,10 @@ export async function ensureConnected() {
         connecting = null;
     });
     return connecting;
+}
+export async function closeConnection() {
+    if (!client)
+        return;
+    await client.end();
+    client = null;
 }
