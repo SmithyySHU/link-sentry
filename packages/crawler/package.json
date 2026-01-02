@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "node --import tsx src/index.ts",
+    "scan:once": "node --import tsx src/runSingleScan.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

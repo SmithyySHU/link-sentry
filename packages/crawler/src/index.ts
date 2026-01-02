@@ -7,28 +7,40 @@ import { normaliseLink } from "./normaliseLink.js";
 import { createScanRun, completeScanRun } from "../../db/src/scanRuns.js";
 import { insertScanResult } from "../../db/src/scanResults.js";
 
-async function crawlPage(siteId: string, startUrl: string) {
+export interface CrawlSummary {
+  scanRunId: string;
+  totalLinks: number;
+  checkedLinks: number;
+  brokenLinks: number;
+  skippedLinks: number;
+}
+
+export async function crawlPage(
+  siteId: string,
+  startUrl: string
+): Promise<CrawlSummary> {
   const scanRunId = await createScanRun(siteId, startUrl);
 
+  let totalLinks = 0;
   let checked = 0;
   let skipped = 0;
-  let brokenLinks = 0;
+  let broken = 0;
 
   try {
     const html = await fetchUrl(startUrl);
     if (!html) {
-      console.error("Failed to fetch the page.");
       await completeScanRun(scanRunId, "failed", {
-        totalLinks: 0,
-        checkedLinks: 0,
-        brokenLinks: 0,
+        totalLinks,
+        checkedLinks: checked,
+        brokenLinks: broken,
       });
-      return;
+      throw new Error("Failed to fetch start URL");
     }
 
     const rawLinks = extractLinks(html);
     const uniqueRawLinks = Array.from(new Set(rawLinks));
-    const totalLinks = uniqueRawLinks.length;
+
+    totalLinks = uniqueRawLinks.length;
 
     console.log(
       `Found ${rawLinks.length} links on ${startUrl} (${uniqueRawLinks.length} unique)`
@@ -45,12 +57,10 @@ async function crawlPage(siteId: string, startUrl: string) {
       const result = await validateLink(normalised.url);
       checked++;
 
-      const verdict = classifyStatus(
-        normalised.url,
-        result.status ?? undefined
-      );
+      const verdict = classifyStatus(normalised.url, result.status ?? undefined);
+
       if (verdict === "broken") {
-        brokenLinks++;
+        broken++;
       }
 
       await insertScanResult({
@@ -65,9 +75,7 @@ async function crawlPage(siteId: string, startUrl: string) {
       if (verdict === "ok") {
         console.log(`OK    ${result.status} ${normalised.url}`);
       } else if (verdict === "blocked") {
-        console.log(
-          `BLKD  ${result.status ?? ""} ${normalised.url}`.trim()
-        );
+        console.log(`BLKD  ${result.status ?? ""} ${normalised.url}`.trim());
       } else {
         const errMsg = result.ok ? "" : result.error ?? "";
         console.log(
@@ -79,29 +87,29 @@ async function crawlPage(siteId: string, startUrl: string) {
     await completeScanRun(scanRunId, "completed", {
       totalLinks,
       checkedLinks: checked,
-      brokenLinks,
+      brokenLinks: broken,
     });
 
     console.log(
-      `Checked: ${checked}, Skipped: ${skipped}, Broken: ${brokenLinks}`
+      `Checked: ${checked}, Skipped: ${skipped}, Broken: ${broken}`
     );
+
+    return {
+      scanRunId,
+      totalLinks,
+      checkedLinks: checked,
+      brokenLinks: broken,
+      skippedLinks: skipped,
+    };
   } catch (err) {
     console.error("Unexpected error during crawl:", err);
+
     await completeScanRun(scanRunId, "failed", {
-      totalLinks: checked + skipped,
+      totalLinks,
       checkedLinks: checked,
-      brokenLinks,
+      brokenLinks: broken,
     });
+
+    throw err;
   }
 }
-
-const [siteIdArg, startUrlArg] = process.argv.slice(2);
-
-if (!siteIdArg || !startUrlArg) {
-  console.error(
-    "Usage: npm run dev:crawler -- <siteId> <startUrl>"
-  );
-  process.exit(1);
-}
-
-await crawlPage(siteIdArg, startUrlArg);
