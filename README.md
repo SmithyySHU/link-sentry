@@ -14,9 +14,24 @@ This project aims to make broken link monitoring a background task that runs aut
 
 ## Current Status
 
-🚧 Planning and early development
+🚧 Planning and Early Development
+Current Status:
 
-No application code has been written yet. The repository currently contains project structure, documentation, and setup files.
+No application code has been written yet.
+
+The repository currently contains project structure, documentation, and setup files.
+
+Initial setup for database configuration and environment variables has been completed.
+
+Database connection tested and confirmed successfully.
+
+Next Steps:
+
+Crawler development: Implement and integrate the crawler functionality.
+
+Database integration: Store scan results in the database, including valid and broken links.
+
+Testing and validation: Ensure proper interaction between the crawler and database.
 
 ## Tech Stack (Planned)
 
