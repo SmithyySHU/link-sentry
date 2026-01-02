@@ -1,25 +1,12 @@
 {
   "compilerOptions": {
-    "declaration": true,
-    "composite": true,
-    "outDir": "../../dist/crawler",
-    "rootDir": "./src",
-    "moduleResolution": "node",
+    "target": "ES2020",
     "module": "ESNext",
-    "target": "ESNext",
+    "moduleResolution": "node",
+    "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "strict": true,
-    "resolveJsonModule": true,
-    "lib": ["ESNext"],
-    "tsBuildInfoFile": "../../dist/crawler/tsconfig.tsbuildinfo"  
+    "forceConsistentCasingInFileNames": true
   },
-  "include": [
-    "src/**/*"
-  ],
-  "references": [
-    {
-      "path": "../db"
-    }
-  ]
+  "include": ["src/**/*"]
 }

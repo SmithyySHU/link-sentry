@@ -1,19 +1,20 @@
-import { Client } from 'pg';
-import dotenv from 'dotenv';
+import { ensureConnected } from "./client.js";
 
-dotenv.config();
+async function main() {
+  try {
+    const client = await ensureConnected();
 
-const client = new Client({
-  connectionString: process.env.DATABASE_URL,
-});
+    const res = await client.query("SELECT current_user, current_database();");
+    const row = res.rows[0];
 
-client.connect()
-  .then(() => {
-    console.log('Connected to the database successfully!');
-  })
-  .catch(err => {
-    console.error('Error connecting to the database:', err);
-  })
-  .finally(() => {
-    client.end();
-  });
+    console.log("DB connection OK ✅");
+    console.log("user:", row.current_user);
+    console.log("db:  ", row.current_database);
+  } catch (err) {
+    console.error("DB connection FAILED ❌");
+    console.error(err);
+    process.exitCode = 1;
+  }
+}
+
+await main();

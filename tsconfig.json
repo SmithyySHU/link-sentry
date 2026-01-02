@@ -1,24 +1,11 @@
 {
   "compilerOptions": {
-    "target": "ES6",
+    "target": "ES2020",
     "module": "ESNext",
     "moduleResolution": "node",
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "outDir": "./dist",
-    "baseUrl": "./",
-    "paths": {
-      "@link-sentry/*": ["packages/*/src"]
-    }
-  },
-  "include": [
-    "packages/crawler/src/**/*",
-    "packages/db/src/**/*"
-  ],
-  "references": [
-    { "path": "packages/crawler" },
-    { "path": "packages/db" }
-  ]
+    "forceConsistentCasingInFileNames": true
+  }
 }

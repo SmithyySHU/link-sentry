@@ -8,10 +8,9 @@
   "scripts": {
     "dev:crawler": "npm run -w @link-sentry/crawler dev",
     "dev:db": "npm run -w @link-sentry/db dev",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc -p packages/crawler && tsc -p packages/db"
   },
   "devDependencies": {
-    "ts-node": "^10.9.2",
     "tsx": "^4.20.5",
     "typescript": "^5.6.3"
   },
