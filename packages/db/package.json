@@ -1,0 +1,20 @@
+{
+  "name": "@link-sentry/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/testConnection.ts",
+    "demo:latest-scan": "node --import tsx src/printLatestScan.ts",
+    "demo:site-history": "node --import tsx src/printSiteHistory.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.3",
+    "@types/pg": "^8.16.0"
+  }
+}
