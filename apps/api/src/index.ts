@@ -1,11 +1,14 @@
 import express from "express";
 import cors from "cors";
+
 import {
   getLatestScanForSite,
-  getScanHistoryForSite,
+  getRecentScansForSite,
 } from "../../../packages/db/src/scans.js";
+import { getResultsForScanRun } from "../../../packages/db/src/scanResults.js";
 import { runScanForSite } from "../../../packages/crawler/src/scanService.js";
 
+const API_BASE = "http://localhost:3001";
 const app = express();
 
 app.use(cors());
@@ -13,6 +16,28 @@ app.use(express.json());
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "link-sentry-api" });
+});
+
+app.get("/sites/:siteId/scans", async (req, res) => {
+  const siteId = req.params.siteId;
+  const limitRaw = req.query.limit;
+  const limit = limitRaw ? Number(limitRaw) : 10;
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return res.status(400).json({ error: "invalid_limit" });
+  }
+
+  try {
+    const scans = await getRecentScansForSite(siteId, limit);
+    res.json({
+      siteId,
+      count: scans.length,
+      scans,
+    });
+  } catch (err) {
+    console.error("Error in GET /sites/:siteId/scans", err);
+    res.status(500).json({ error: "internal_error" });
+  }
 });
 
 app.get("/sites/:siteId/scans/latest", async (req, res) => {
@@ -35,66 +60,61 @@ app.get("/sites/:siteId/scans/latest", async (req, res) => {
   }
 });
 
-app.get("/sites/:siteId/scans", async (req, res) => {
-  const siteId = req.params.siteId;
-  const limitParam = req.query.limit;
-  let limit = 20;
-
-  if (typeof limitParam === "string") {
-    const parsed = Number.parseInt(limitParam, 10);
-    if (!Number.isNaN(parsed)) {
-      limit = Math.min(Math.max(parsed, 1), 200);
-    }
-  }
-
-  try {
-    const scans = await getScanHistoryForSite(siteId, limit);
-    res.json({
-      siteId,
-      count: scans.length,
-      scans,
-    });
-  } catch (err) {
-    console.error("Error in GET /sites/:siteId/scans", err);
-    res.status(500).json({ error: "internal_error" });
-  }
-});
-
 app.post("/sites/:siteId/scans", async (req, res) => {
   const siteId = req.params.siteId;
-  const body = req.body ?? {};
-  const startUrl = body.startUrl;
+  const body = req.body as { startUrl?: string };
 
-  if (!startUrl || typeof startUrl !== "string") {
+  if (!body.startUrl || typeof body.startUrl !== "string") {
     return res.status(400).json({
-      error: "invalid_request",
-      message: "startUrl is required in the request body",
+      error: "invalid_start_url",
+      message: "body.startUrl must be a non-empty string",
     });
   }
 
   try {
-    new URL(startUrl);
-  } catch {
-    return res.status(400).json({
-      error: "invalid_url",
-      message: "startUrl must be a valid URL",
-    });
-  }
+    const summary = await runScanForSite(siteId, body.startUrl);
 
-  try {
-    const summary = await runScanForSite(siteId, startUrl);
-
-    res.status(202).json({
+    res.status(201).json({
       scanRunId: summary.scanRunId,
       siteId,
-      startUrl,
+      startUrl: body.startUrl,
       totalLinks: summary.totalLinks,
       checkedLinks: summary.checkedLinks,
       brokenLinks: summary.brokenLinks,
     });
   } catch (err) {
     console.error("Error in POST /sites/:siteId/scans", err);
-    res.status(500).json({ error: "scan_failed" });
+    res.status(500).json({ error: "internal_error" });
+  }
+});
+
+app.get("/scan-runs/:scanRunId/results", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+
+  const limit = limitRaw ? Number(limitRaw) : 200;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return res.status(400).json({ error: "invalid_limit" });
+  }
+
+  if (Number.isNaN(offset) || offset < 0) {
+    return res.status(400).json({ error: "invalid_offset" });
+  }
+
+  try {
+    const results = await getResultsForScanRun(scanRunId, { limit, offset });
+
+    res.json({
+      scanRunId,
+      count: results.length,
+      results,
+    });
+  } catch (err) {
+    console.error("Error in GET /scan-runs/:scanRunId/results", err);
+    res.status(500).json({ error: "internal_error" });
   }
 });
 

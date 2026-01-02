@@ -9,6 +9,7 @@
     "dev:crawler": "npm run -w @link-sentry/crawler dev",
     "dev:db": "npm run -w @link-sentry/db dev",
     "dev:api": "npm run -w @link-sentry/api dev",
+    "dev:web": "npm run -w @link-sentry/web dev",
     "demo:latest-scan": "npm run -w @link-sentry/db demo:latest-scan",
     "demo:site-history": "npm run -w @link-sentry/db demo:site-history --",
     "scan:once": "npm run -w @link-sentry/crawler scan:once --",
@@ -22,6 +23,8 @@
   "dependencies": {
     "cheerio": "^1.1.2",
     "pg": "^8.16.3",
-    "dotenv": "^16.4.5"
+    "dotenv": "^16.4.5",
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
   }
 }
