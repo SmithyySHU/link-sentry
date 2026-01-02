@@ -1,4 +1,4 @@
-import { closeConnection, ensureConnected } from "./client.js";
+import { ensureConnected, closeConnection } from "./client.js";
 import type { ScanRunRow } from "./scanRuns.js";
 
 async function main(): Promise<void> {
@@ -26,39 +26,37 @@ async function main(): Promise<void> {
       FROM scan_runs
       WHERE site_id = $1
       ORDER BY started_at DESC
-      LIMIT 20
     `,
     [siteId]
   );
 
-  console.log(`Scans for site ${siteId} (${res.rowCount} total):`);
-
   if (res.rowCount === 0) {
+    console.log("No scans found for site", siteId);
     await closeConnection();
     return;
   }
 
-  for (const run of res.rows) {
-    const started = new Date(run.started_at).toISOString();
-    const finished = run.finished_at
-      ? new Date(run.finished_at).toISOString()
-      : "in-progress";
+  console.log(`Scans for site ${siteId} (${res.rowCount} total):`);
 
-    const total = run.total_links ?? 0;
-    const checked = run.checked_links ?? 0;
-    const broken = run.broken_links ?? 0;
-    const healthy = checked > 0 ? checked - broken : 0;
+  for (const run of res.rows) {
+    const healthy = run.checked_links - run.broken_links;
     const brokenPct =
-      checked > 0 ? ((broken / checked) * 100).toFixed(1) : "0.0";
+      run.checked_links > 0
+        ? (run.broken_links / run.checked_links) * 100
+        : 0;
 
     console.log("--------------------------------------------------");
     console.log(`run:      ${run.id}`);
     console.log(`status:   ${run.status}`);
-    console.log(`url:      ${run.start_url ?? "?"}`);
-    console.log(`started:  ${started}`);
-    console.log(`finished: ${finished}`);
+    console.log(`url:      ${run.start_url}`);
+    console.log(`started:  ${run.started_at.toISOString()}`);
     console.log(
-      `links:    total=${total}, checked=${checked}, broken=${broken}, healthy=${healthy} (${brokenPct}% broken)`
+      `finished: ${run.finished_at ? run.finished_at.toISOString() : "in-progress"}`
+    );
+    console.log(
+      `links:    total=${run.total_links}, checked=${run.checked_links}, broken=${run.broken_links}, healthy=${healthy} (${brokenPct.toFixed(
+        1
+      )}% broken)`
     );
   }
 

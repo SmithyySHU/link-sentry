@@ -11,12 +11,9 @@ async function main(): Promise<void> {
   console.log(`Starting scan for site ${siteId}`);
   console.log(`Start URL: ${startUrl}`);
 
-  const summary = await runScanForSite(siteId, startUrl);
+  await runScanForSite(siteId, startUrl);
 
   console.log("Scan completed.");
-  console.log(
-    `Run: ${summary.scanRunId}, total=${summary.totalLinks}, checked=${summary.checkedLinks}, broken=${summary.brokenLinks}`
-  );
 }
 
 await main();

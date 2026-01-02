@@ -3,22 +3,15 @@ import extractLinks from "./extractLinks.js";
 import validateLink from "./validateLink.js";
 import { classifyStatus } from "./classifyStatus.js";
 import { normaliseLink } from "./normaliseLink.js";
+import { MAX_LINKS_PER_PAGE } from "./limits.js";
 
-import {
-  createScanRun,
-  completeScanRun,
-  type ScanRunSummary,
-} from "../../db/src/scanRuns.js";
+import { createScanRun, completeScanRun } from "../../db/src/scanRuns.js";
 import { insertScanResult } from "../../db/src/scanResults.js";
-
-export interface ScanExecutionSummary extends ScanRunSummary {
-  scanRunId: string;
-}
 
 export async function runScanForSite(
   siteId: string,
   startUrl: string
-): Promise<ScanExecutionSummary> {
+): Promise<void> {
   const scanRunId = await createScanRun(siteId, startUrl);
 
   let checked = 0;
@@ -33,25 +26,22 @@ export async function runScanForSite(
         checkedLinks: 0,
         brokenLinks: 0,
       });
-
-      return {
-        scanRunId,
-        totalLinks: 0,
-        checkedLinks: 0,
-        brokenLinks: 0,
-      };
+      return;
     }
 
     const rawLinks = extractLinks(html);
     const uniqueRawLinks = Array.from(new Set(rawLinks));
 
+    const linksToCheck =
+      uniqueRawLinks.length > MAX_LINKS_PER_PAGE
+        ? uniqueRawLinks.slice(0, MAX_LINKS_PER_PAGE)
+        : uniqueRawLinks;
+
     console.log(
-      `Found ${rawLinks.length} links on ${startUrl} (${uniqueRawLinks.length} unique)`
+      `Found ${rawLinks.length} links on ${startUrl} (${uniqueRawLinks.length} unique, checking ${linksToCheck.length})`
     );
 
-    const totalLinks = uniqueRawLinks.length;
-
-    for (const rawHref of uniqueRawLinks) {
+    for (const rawHref of linksToCheck) {
       const normalised = normaliseLink(rawHref, startUrl);
 
       if (normalised.kind === "skip") {
@@ -59,10 +49,11 @@ export async function runScanForSite(
         continue;
       }
 
-      const result = await validateLink(normalised.url);
       checked++;
 
+      const result = await validateLink(normalised.url);
       const verdict = classifyStatus(normalised.url, result.status ?? undefined);
+
       if (verdict === "broken") {
         broken++;
       }
@@ -90,36 +81,34 @@ export async function runScanForSite(
       }
     }
 
-    console.log(`Checked: ${checked}, Skipped: ${skipped}, Broken: ${broken}`);
-
-    const summary: ScanRunSummary = {
-      totalLinks,
+    await completeScanRun(scanRunId, "completed", {
+      totalLinks: uniqueRawLinks.length,
       checkedLinks: checked,
       brokenLinks: broken,
-    };
+    });
 
-    await completeScanRun(scanRunId, "completed", summary);
-
-    return {
-      scanRunId,
-      ...summary,
-    };
+    console.log(
+      `Checked: ${checked}, Skipped: ${skipped}, Broken: ${broken}`
+    );
   } catch (err) {
     console.error("Unexpected error during crawl:", err);
-
-    const totalLinks = checked + skipped;
-
-    const summary: ScanRunSummary = {
-      totalLinks,
+    await completeScanRun(scanRunId, "failed", {
+      totalLinks: 0,
       checkedLinks: checked,
       brokenLinks: broken,
-    };
-
-    await completeScanRun(scanRunId, "failed", summary);
-
-    return {
-      scanRunId,
-      ...summary,
-    };
+    });
   }
+}
+
+export async function runScanForSiteFromArgs(): Promise<void> {
+  const siteId = process.argv[2];
+  const url = process.argv[3];
+
+  if (!siteId || !url) {
+    console.error("Usage: npm run scan:once -- <siteId> <url>");
+    process.exitCode = 1;
+    return;
+  }
+
+  await runScanForSite(siteId, url);
 }
