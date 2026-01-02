@@ -8,6 +8,7 @@
   "scripts": {
     "dev:crawler": "npm run -w @link-sentry/crawler dev",
     "dev:db": "npm run -w @link-sentry/db dev",
+    "demo:site-history": "npm run -w @link-sentry/db demo:site-history",
     "typecheck": "tsc -p packages/crawler && tsc -p packages/db"
   },
   "devDependencies": {
