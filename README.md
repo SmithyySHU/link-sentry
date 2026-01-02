@@ -14,24 +14,38 @@ This project aims to make broken link monitoring a background task that runs aut
 
 ## Current Status
 
-🚧 Planning and Early Development
-Current Status:
+## 🚧 Project status
 
-No application code has been written yet.
+Link-Sentry is in **early backend development**, but there’s already real code running.
 
-The repository currently contains project structure, documentation, and setup files.
+What’s implemented so far:
 
-Initial setup for database configuration and environment variables has been completed.
+- Monorepo layout with npm workspaces (`packages/crawler`, `packages/db`)
+- Crawler service that:
+  - fetches a page
+  - extracts links
+  - normalises URLs
+  - validates links with timeouts and a custom User-Agent
+  - classifies links as `ok`, `broken`, or `blocked`
+- PostgreSQL schema and data layer:
+  - `sites`, `scan_runs`, `scan_results`
+  - shared connection helper using `DATABASE_URL`
+- CLI workflows for local development:
+  - Run a single scan and persist results:
+    ```bash
+    npm run scan:once -- <siteId> <startUrl>
+    ```
+  - Inspect the latest scan:
+    ```bash
+    npm run demo:latest-scan
+    ```
+  - View history of scans for a site:
+    ```bash
+    npm run demo:site-history -- <siteId>
+    ```
 
-Database connection tested and confirmed successfully.
+This is still developer-focused tooling; there’s no public UI yet. Next steps are a small API layer and a basic dashboard to surface these scan results.
 
-Next Steps:
-
-Crawler development: Implement and integrate the crawler functionality.
-
-Database integration: Store scan results in the database, including valid and broken links.
-
-Testing and validation: Ensure proper interaction between the crawler and database.
 
 ## Tech Stack (Planned)
 
