@@ -1,17 +1,19 @@
-import "dotenv/config";
-import pg from "pg";
+import { Client } from 'pg';
+import dotenv from 'dotenv';
 
-const { Pool } = pg;
+dotenv.config();
 
-const url = process.env.DATABASE_URL;
-if (!url) {
-  console.error("Missing DATABASE_URL in environment.");
-  process.exit(1);
-}
+const client = new Client({
+  connectionString: process.env.DATABASE_URL,
+});
 
-const pool = new Pool({ connectionString: url });
-
-const result = await pool.query("SELECT current_user, current_database();");
-console.log(result.rows[0]);
-
-await pool.end();
+client.connect()
+  .then(() => {
+    console.log('Connected to the database successfully!');
+  })
+  .catch(err => {
+    console.error('Error connecting to the database:', err);
+  })
+  .finally(() => {
+    client.end();
+  });

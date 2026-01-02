@@ -2,7 +2,7 @@
   "compilerOptions": {
     "declaration": true,
     "composite": true,
-    "outDir": "../../dist/crawler",
+    "outDir": "../../dist/db",
     "rootDir": "./src",
     "moduleResolution": "node",
     "module": "ESNext",
@@ -12,14 +12,10 @@
     "strict": true,
     "resolveJsonModule": true,
     "lib": ["ESNext"],
-    "tsBuildInfoFile": "../../dist/crawler/tsconfig.tsbuildinfo"  
+    "tsBuildInfoFile": "../../dist/db/tsconfig.tsbuildinfo"  
   },
   "include": [
     "src/**/*"
   ],
-  "references": [
-    {
-      "path": "../db"
-    }
-  ]
+  "references": []
 }

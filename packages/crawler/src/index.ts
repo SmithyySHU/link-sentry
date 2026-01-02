@@ -33,7 +33,7 @@ async function crawlPage(url: string) {
     checked++;
 
     const result = await validateLink(normalised.url);
-    const verdict = classifyStatus(normalised.url, result.status);
+    const verdict = classifyStatus(normalised.url, result.status ?? undefined);
 
 
     if (verdict === "ok") {
