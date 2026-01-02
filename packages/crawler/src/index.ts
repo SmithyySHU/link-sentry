@@ -13,25 +13,22 @@ async function crawlPage(siteId: string, startUrl: string) {
   let checked = 0;
   let skipped = 0;
   let brokenLinks = 0;
-  let totalLinks = 0;
 
   try {
     const html = await fetchUrl(startUrl);
     if (!html) {
       console.error("Failed to fetch the page.");
-
       await completeScanRun(scanRunId, "failed", {
         totalLinks: 0,
         checkedLinks: 0,
         brokenLinks: 0,
       });
-
       return;
     }
 
     const rawLinks = extractLinks(html);
     const uniqueRawLinks = Array.from(new Set(rawLinks));
-    totalLinks = uniqueRawLinks.length;
+    const totalLinks = uniqueRawLinks.length;
 
     console.log(
       `Found ${rawLinks.length} links on ${startUrl} (${uniqueRawLinks.length} unique)`
@@ -48,7 +45,10 @@ async function crawlPage(siteId: string, startUrl: string) {
       const result = await validateLink(normalised.url);
       checked++;
 
-      const verdict = classifyStatus(normalised.url, result.status ?? undefined);
+      const verdict = classifyStatus(
+        normalised.url,
+        result.status ?? undefined
+      );
       if (verdict === "broken") {
         brokenLinks++;
       }
@@ -65,7 +65,9 @@ async function crawlPage(siteId: string, startUrl: string) {
       if (verdict === "ok") {
         console.log(`OK    ${result.status} ${normalised.url}`);
       } else if (verdict === "blocked") {
-        console.log(`BLKD  ${result.status ?? ""} ${normalised.url}`.trim());
+        console.log(
+          `BLKD  ${result.status ?? ""} ${normalised.url}`.trim()
+        );
       } else {
         const errMsg = result.ok ? "" : result.error ?? "";
         console.log(
@@ -80,21 +82,26 @@ async function crawlPage(siteId: string, startUrl: string) {
       brokenLinks,
     });
 
-    console.log(`Checked: ${checked}, Skipped: ${skipped}`);
+    console.log(
+      `Checked: ${checked}, Skipped: ${skipped}, Broken: ${brokenLinks}`
+    );
   } catch (err) {
     console.error("Unexpected error during crawl:", err);
-
     await completeScanRun(scanRunId, "failed", {
-      totalLinks,
+      totalLinks: checked + skipped,
       checkedLinks: checked,
       brokenLinks,
     });
-
-    throw err;
   }
 }
 
-await crawlPage(
-  "85efa142-35dc-4b06-93ee-fb7180ab28fd",
-  "https://twiddlefood.co.uk"
-);
+const [siteIdArg, startUrlArg] = process.argv.slice(2);
+
+if (!siteIdArg || !startUrlArg) {
+  console.error(
+    "Usage: npm run dev:crawler -- <siteId> <startUrl>"
+  );
+  process.exit(1);
+}
+
+await crawlPage(siteIdArg, startUrlArg);

@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/testConnection.ts",
+    "demo:latest-scan": "node --import tsx src/printLatestScan.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

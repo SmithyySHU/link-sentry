@@ -24,3 +24,9 @@ export async function ensureConnected(): Promise<Client> {
 
   return connecting;
 }
+
+export async function closeConnection(): Promise<void> {
+  if (!client) return;
+  await client.end();
+  client = null;
+}
