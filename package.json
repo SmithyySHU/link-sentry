@@ -8,6 +8,7 @@
   "scripts": {
     "dev:crawler": "npm run -w @link-sentry/crawler dev",
     "dev:db": "npm run -w @link-sentry/db dev",
+    "dev:api": "npm run -w @link-sentry/api dev",
     "demo:latest-scan": "npm run -w @link-sentry/db demo:latest-scan",
     "demo:site-history": "npm run -w @link-sentry/db demo:site-history --",
     "scan:once": "npm run -w @link-sentry/crawler scan:once --",
