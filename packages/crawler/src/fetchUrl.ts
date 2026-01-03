@@ -86,6 +86,8 @@ async function ensureSafeDestination(hostname: string): Promise<void> {
   }
 }
 
+const ALLOWED_PORTS = new Set<number>([80, 443]); // http/https defaults
+
 async function validateCrawlTarget(rawUrl: string): Promise<URL> {
   let url: URL;
   try {
@@ -98,14 +100,20 @@ async function validateCrawlTarget(rawUrl: string): Promise<URL> {
     throw new Error(`Disallowed protocol in crawl URL: ${url.protocol}`);
   }
 
+  // Optional: restrict ports to typical web ports only
+  const port = url.port ? Number(url.port) : (url.protocol === "https:" ? 443 : 80);
+  if (!ALLOWED_PORTS.has(port)) {
+    throw new Error(`Disallowed port in crawl URL: ${port}`);
+  }
+
   await ensureSafeDestination(url.hostname);
 
   return url;
 }
 
-// codeql[js/request-forgery]: warning
 // The crawler intentionally fetches user-supplied URLs, but we:
 // - restrict to http/https
+// - restrict ports to 80/443
 // - resolve DNS and block private/loopback IP ranges
 // - revalidate on redirects and cap redirect depth
 export default async function fetchUrl(
@@ -141,21 +149,24 @@ export default async function fetchUrl(
       if (status >= 300 && status < 400) {
         const location = res.headers.get("location");
         if (!location) {
-          console.error(`Redirect from ${currentUrl} without Location header`);
+          console.error("Redirect without Location header", {
+            fromUrl: currentUrl,
+            status,
+          });
           return null;
         }
 
         const nextUrl = new URL(location, currentUrl);
-        // Revalidate the redirect target (protocol + hostname/IP)
         await validateCrawlTarget(nextUrl.toString());
         currentUrl = nextUrl.toString();
 
         if (i === MAX_REDIRECTS) {
-          console.error(`Too many redirects when fetching ${initialUrl}`);
+          console.error("Too many redirects when fetching URL", {
+            initialUrl,
+          });
           return null;
         }
 
-        // loop again with new currentUrl
         continue;
       }
 
@@ -164,30 +175,43 @@ export default async function fetchUrl(
     }
 
     if (!res) {
-      console.error(`No response received for ${initialUrl}`);
+      console.error("No response received for URL", { initialUrl });
       return null;
     }
 
     if (!res.ok) {
-      console.error(`Failed to fetch ${currentUrl}: HTTP ${res.status}`);
+      console.error("Failed to fetch URL", {
+        url: currentUrl,
+        status: res.status,
+      });
       return null;
     }
 
     const contentType = res.headers.get("content-type");
     if (contentType && !contentType.includes("text/html")) {
-      console.error(`Non-HTML content for ${currentUrl}: ${contentType}`);
+      console.error("Non-HTML content for URL", {
+        url: currentUrl,
+        contentType,
+      });
       return null;
     }
 
     return await res.text();
   } catch (err: any) {
     if (err?.name === "AbortError") {
-      console.error(`Timed out fetching ${rawUrl} after ${timeoutMs}ms`);
+      console.error("Timed out fetching URL", {
+        url: rawUrl,
+        timeoutMs,
+      });
     } else {
-      console.error(`Error fetching ${rawUrl}:`, err);
+      console.error("Error fetching URL", {
+        url: rawUrl,
+        error: err,
+      });
     }
     return null;
   } finally {
     clearTimeout(timer);
   }
 }
+
