@@ -40,6 +40,10 @@ export default async function fetchUrl(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
+    // We deliberately allow crawling arbitrary external URLs, but we run them
+    // through validateCrawlTarget first to restrict protocols and block
+    // localhost/loopback targets to reduce SSRF risk.
+    // codeql[js/request-forgery]: safeUrl has been validated in validateCrawlTarget.
     const res = await fetch(safeUrl, {
       method: "GET",
       signal: controller.signal,
