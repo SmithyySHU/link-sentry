@@ -1,5 +1,18 @@
 import { ensureConnected } from "./client.js";
-import type { ScanRunRow } from "./scanRuns.js";
+
+export type ScanStatus = "in_progress" | "completed" | "failed";
+
+export interface ScanRunRow {
+  id: string;
+  site_id: string;
+  status: ScanStatus;
+  started_at: Date;
+  finished_at: Date | null;
+  start_url: string;
+  total_links: number;
+  checked_links: number;
+  broken_links: number;
+}
 
 export async function getLatestScanForSite(
   siteId: string
@@ -33,9 +46,9 @@ export async function getLatestScanForSite(
   return res.rows[0];
 }
 
-export async function getScanHistoryForSite(
+export async function getRecentScansForSite(
   siteId: string,
-  limit = 20
+  limit: number
 ): Promise<ScanRunRow[]> {
   const client = await ensureConnected();
 
