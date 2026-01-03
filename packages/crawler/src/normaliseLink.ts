@@ -11,7 +11,13 @@ export function normaliseLink(rawHref: string, baseUrl: string): NormalisedLink 
   const lower = href.toLowerCase();
   if (lower.startsWith("mailto:")) return { kind: "skip", reason: "mailto" };
   if (lower.startsWith("tel:")) return { kind: "skip", reason: "tel" };
-  if (lower.startsWith("javascript:")) return { kind: "skip", reason: "javascript" };
+  if (
+    lower.startsWith("javascript:") ||
+    lower.startsWith("data:") ||
+    lower.startsWith("vbscript:")
+  ) {
+    return { kind: "skip", reason: "javascript" };
+  }
 
   try {
     const url = new URL(href, baseUrl);
