@@ -11,8 +11,7 @@ If you find a security issue, please **do not** open a public GitHub issue.
 
 Instead, contact the maintainer directly:
 
-- Email: _[add your email or preferred contact here]_
-- Or open a GitHub Security Advisory (privately) if available on this repo.
+GitHub Security Advisory (privately) if available on this repo.
 
 We aim to acknowledge new reports within a reasonable timeframe and keep you
 updated on progress.
