@@ -5,10 +5,18 @@ import {
   getLatestScanForSite,
   getRecentScansForSite,
 } from "../../../packages/db/src/scans.js";
+import {
+  getSitesForUser,
+  getAllSites,
+  getSiteById,
+  createSite,
+  deleteSite,
+} from "../../../packages/db/src/sites.js";
 import { getResultsForScanRun } from "../../../packages/db/src/scanResults.js";
 import { runScanForSite } from "../../../packages/crawler/src/scanService.js";
 
-const API_BASE = "http://localhost:3001";
+const DEMO_USER_ID = "00000000-0000-0000-0000-000000000000";
+
 const app = express();
 
 app.use(cors());
@@ -18,6 +26,27 @@ app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "link-sentry-api" });
 });
 
+// List sites for a (temporary) demo user
+app.get("/sites", async (req, res) => {
+  try {
+    const userId = (req.query.userId as string) ?? DEMO_USER_ID;
+    const sites = await getSitesForUser(userId);
+
+    res.json({
+      userId,
+      count: sites.length,
+      sites,
+    });
+  } catch (err: any) {
+    console.error("Error fetching sites", err);
+    res.status(500).json({
+      error: "Failed to fetch sites",
+      details: err?.message ?? String(err),
+    });
+  }
+});
+
+// Recent scans for a site
 app.get("/sites/:siteId/scans", async (req, res) => {
   const siteId = req.params.siteId;
   const limitRaw = req.query.limit;
@@ -28,7 +57,8 @@ app.get("/sites/:siteId/scans", async (req, res) => {
   }
 
   try {
-    const scans = await getRecentScansForSite(siteId, limit);
+    const scans = await (getRecentScansForSite as any)(siteId, limit);
+
     res.json({
       siteId,
       count: scans.length,
@@ -40,6 +70,7 @@ app.get("/sites/:siteId/scans", async (req, res) => {
   }
 });
 
+// Latest scan for a site
 app.get("/sites/:siteId/scans/latest", async (req, res) => {
   const siteId = req.params.siteId;
 
@@ -60,6 +91,32 @@ app.get("/sites/:siteId/scans/latest", async (req, res) => {
   }
 });
 
+// Create a new site
+app.post("/sites", async (req, res) => {
+  try {
+    const userId = (req.body.userId as string) ?? DEMO_USER_ID;
+    const url = req.body.url as string | undefined;
+
+    if (!url) {
+      return res.status(400).json({
+        error: "missing_url",
+        message: "Missing 'url' in body",
+      });
+    }
+
+    const site = await createSite(userId, url);
+
+    res.status(201).json({ site });
+  } catch (err: any) {
+    console.error("Error creating site", err);
+    res.status(500).json({
+      error: "Failed to create site",
+      details: err?.message ?? String(err),
+    });
+  }
+});
+
+// Trigger a new scan
 app.post("/sites/:siteId/scans", async (req, res) => {
   const siteId = req.params.siteId;
   const body = req.body as { startUrl?: string };
@@ -88,6 +145,7 @@ app.post("/sites/:siteId/scans", async (req, res) => {
   }
 });
 
+// Results for a scan run
 app.get("/scan-runs/:scanRunId/results", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   const limitRaw = req.query.limit;
@@ -115,6 +173,40 @@ app.get("/scan-runs/:scanRunId/results", async (req, res) => {
   } catch (err) {
     console.error("Error in GET /scan-runs/:scanRunId/results", err);
     res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// Delete a site (and its scans/results)
+app.delete("/sites/:siteId", async (req, res) => {
+  const siteId = req.params.siteId;
+  const userId = (req.query.userId as string) ?? DEMO_USER_ID;
+
+  try {
+    // Ensure the site belongs to this user
+    const site = await getSiteById(siteId);
+    if (!site || site.user_id !== userId) {
+      return res.status(404).json({
+        error: "site_not_found",
+        message: `No site found with id ${siteId}`,
+      });
+    }
+
+    const deleted = await deleteSite(siteId);
+
+    if (!deleted) {
+      return res.status(500).json({
+        error: "delete_failed",
+        message: `Could not delete site ${siteId}`,
+      });
+    }
+
+    return res.status(204).send();
+  } catch (err: any) {
+    console.error("Error deleting site", err);
+    return res.status(500).json({
+      error: "Failed to delete site",
+      details: err?.message ?? String(err),
+    });
   }
 });
 

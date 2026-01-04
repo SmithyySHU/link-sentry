@@ -9,6 +9,8 @@ import {
 } from "../../db/src/scanRuns.js";
 import { insertScanResult } from "../../db/src/scanResults.js";
 
+
+
 export interface ScanExecutionSummary {
   scanRunId: string;
   totalLinks: number;
