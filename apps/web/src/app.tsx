@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 type ScanStatus = "in_progress" | "completed" | "failed";
 
@@ -51,6 +51,11 @@ interface ScanResultsResponse {
 }
 
 const API_BASE = "http://localhost:3001";
+const POLL_MS = 1500;
+
+function isInProgress(status: ScanStatus | string | null | undefined) {
+  return status === "in_progress";
+}
 
 function formatDate(value: string | null) {
   if (!value) return "-";
@@ -65,63 +70,195 @@ function percentBroken(total: number, broken: number) {
   return `${p.toFixed(1)}%`;
 }
 
+function progressPercent(checked: number, total: number) {
+  if (!total) return "0%";
+  const pct = Math.min(100, Math.max(0, (checked / total) * 100));
+  return `${pct.toFixed(0)}%`;
+}
+
+type LoadHistoryOpts = {
+  preserveSelection?: boolean;
+  skipResultsWhileInProgress?: boolean;
+};
+
 const App: React.FC = () => {
-  // Sites
+  const scansRef = useRef<HTMLDivElement | null>(null);
+
+  const pollHistoryRef = useRef<number | null>(null);
+
+  const selectedSiteIdRef = useRef<string | null>(null);
+  const selectedRunIdRef = useRef<string | null>(null);
+
   const [sites, setSites] = useState<Site[]>([]);
   const [sitesLoading, setSitesLoading] = useState(false);
   const [sitesError, setSitesError] = useState<string | null>(null);
   const [selectedSiteId, setSelectedSiteId] = useState<string | null>(null);
 
-  // Scan history for selected site
   const [history, setHistory] = useState<ScanRunSummary[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [historyError, setHistoryError] = useState<string | null>(null);
 
-  // Results for selected scan
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [results, setResults] = useState<ScanResultRow[]>([]);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [resultsError, setResultsError] = useState<string | null>(null);
 
-  // Scan trigger
   const [startUrl, setStartUrl] = useState("");
   const [triggeringScan, setTriggeringScan] = useState(false);
   const [triggerError, setTriggerError] = useState<string | null>(null);
 
+  const [newSiteUrl, setNewSiteUrl] = useState("");
+  const [creatingSite, setCreatingSite] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  const [deletingSiteId, setDeletingSiteId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
+
+  const hasSites = sites.length > 0;
+
+  const sseRef = useRef<{ runId: string; es: EventSource } | null>(null);
+
+  useEffect(() => {
+    selectedSiteIdRef.current = selectedSiteId;
+  }, [selectedSiteId]);
+
+  useEffect(() => {
+    selectedRunIdRef.current = selectedRunId;
+  }, [selectedRunId]);
+
+  useEffect(() => {
+    activeRunIdRef.current = activeRunId;
+  }, [activeRunId]);
+
+  const pinnedRunId = activeRunId ?? selectedRunId;
+
   const selectedRun = useMemo(() => {
-    if (selectedRunId) {
-      const found = history.find((r) => r.id === selectedRunId);
+    if (pinnedRunId) {
+      const found = history.find((r) => r.id === pinnedRunId);
       if (found) return found;
     }
     return history.length > 0 ? history[0] : null;
-  }, [history, selectedRunId]);
+  }, [history, pinnedRunId]);
+
+  const brokenResults = useMemo(
+    () => results.filter((r) => r.classification === "broken"),
+    [results]
+  );
+
+  const isSelectedRunInProgress = isInProgress(selectedRun?.status);
+
+  function stopRunStream() {
+    if (sseRef.current) {
+      try {
+        sseRef.current.es.close();
+      } catch {}
+      sseRef.current = null;
+    }
+  }
+
+  function startRunStream(runId: string) {
+    if (!runId) return;
+
+    if (sseRef.current?.runId === runId) return;
+
+    stopRunStream();
+
+    const es = new EventSource(
+      `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/events`
+    );
+
+    sseRef.current = { runId, es };
+
+    es.addEventListener("run", (evt: MessageEvent) => {
+      try {
+        const run: ScanRunSummary = JSON.parse(evt.data);
+
+        setHistory((prev) => {
+          const idx = prev.findIndex((r) => r.id === run.id);
+          if (idx === -1) return [run, ...prev];
+          const copy = [...prev];
+          copy[idx] = run;
+          return copy;
+        });
+
+        setSelectedRunId(run.id);
+
+        if (!isInProgress(run.status)) {
+          stopRunStream();
+          setActiveRunId(null);
+          void loadHistory(run.site_id, { preserveSelection: true });
+          void loadResults(run.id);
+        }
+      } catch {}
+    });
+
+    es.addEventListener("done", () => {
+      stopRunStream();
+    });
+
+    es.onerror = () => {
+      // EventSource auto-reconnects; no action needed here
+    };
+  }
+
+  function stopPolling() {
+    if (pollHistoryRef.current) {
+      window.clearInterval(pollHistoryRef.current);
+      pollHistoryRef.current = null;
+    }
+    stopRunStream();
+  }
+
+  function startPolling(runIdOverride?: string) {
+    stopPolling();
+
+    pollHistoryRef.current = window.setInterval(() => {
+      const siteId = selectedSiteIdRef.current;
+      if (!siteId) return;
+
+      if (activeRunIdRef.current) return;
+
+      void loadHistory(siteId, { preserveSelection: true });
+    }, POLL_MS);
+
+    const runId = runIdOverride ?? activeRunIdRef.current ?? selectedRunIdRef.current;
+    if (runId) startRunStream(runId);
+  }
 
   useEffect(() => {
-    loadSites();
+    void loadSites();
+    return stopPolling;
   }, []);
 
   async function loadSites() {
     setSitesLoading(true);
     setSitesError(null);
     try {
-      const res = await fetch(`${API_BASE}/sites`);
-      if (!res.ok) {
-        throw new Error(`Request failed: ${res.status}`);
-      }
-
+      const res = await fetch(`${API_BASE}/sites`, { cache: "no-store" });
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
       const data: SitesResponse = await res.json();
+
       setSites(data.sites);
 
       if (data.sites.length > 0) {
         const first = data.sites[0];
         setSelectedSiteId(first.id);
         setStartUrl(first.url);
-        await loadHistory(first.id);
+        setActiveRunId(null);
+        setSelectedRunId(null);
+        setResults([]);
+        setHistory([]);
+        await loadHistory(first.id, { preserveSelection: false });
       } else {
         setSelectedSiteId(null);
         setHistory([]);
         setSelectedRunId(null);
         setResults([]);
+        setStartUrl("");
+        setActiveRunId(null);
       }
     } catch (err: any) {
       setSitesError(err?.message ?? "Failed to load sites");
@@ -130,27 +267,65 @@ const App: React.FC = () => {
     }
   }
 
-  async function loadHistory(siteId: string) {
+  async function loadHistory(siteId: string, opts?: LoadHistoryOpts) {
+    const preserveSelection = !!opts?.preserveSelection;
+    const skipResultsWhileInProgress = !!opts?.skipResultsWhileInProgress;
+
     setHistoryLoading(true);
     setHistoryError(null);
     try {
       const res = await fetch(
-        `${API_BASE}/sites/${encodeURIComponent(siteId)}/scans?limit=10`
+        `${API_BASE}/sites/${encodeURIComponent(siteId)}/scans?limit=10`,
+        { cache: "no-store" }
       );
-      if (!res.ok) {
-        throw new Error(`Request failed: ${res.status}`);
-      }
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
 
       const data: ScanHistoryResponse = await res.json();
-      setHistory(data.scans);
+      let scans = data.scans ?? [];
 
-      if (data.scans.length > 0) {
-        const firstRun = data.scans[0];
-        setSelectedRunId(firstRun.id);
-        await loadResults(firstRun.id);
-      } else {
-        setSelectedRunId(null);
+      const pinned = activeRunIdRef.current;
+      if (pinned) {
+        const localPinned = history.find((r) => r.id === pinned);
+        const exists = scans.some((r) => r.id === pinned);
+        if (!exists && localPinned) {
+          scans = [localPinned, ...scans];
+        }
+      }
+
+      setHistory(scans);
+
+      if (scans.length === 0) {
+        if (!preserveSelection) setSelectedRunId(null);
         setResults([]);
+        return;
+      }
+
+      const prevSelected = selectedRunIdRef.current;
+      const activePinned = activeRunIdRef.current;
+
+      let nextSelectedId: string;
+      if (activePinned) {
+        nextSelectedId = activePinned;
+      } else if (preserveSelection && prevSelected && scans.some((r) => r.id === prevSelected)) {
+        nextSelectedId = prevSelected;
+      } else {
+        nextSelectedId = scans[0].id;
+      }
+
+      if (nextSelectedId !== selectedRunIdRef.current) {
+        setSelectedRunId(nextSelectedId);
+      }
+
+      const run = scans.find((r) => r.id === nextSelectedId) ?? scans[0];
+
+      if (skipResultsWhileInProgress && isInProgress(run.status)) {
+        return;
+      }
+
+      if (!isInProgress(run.status)) {
+        await loadResults(nextSelectedId);
+      } else {
+        startRunStream(nextSelectedId);
       }
     } catch (err: any) {
       setHistoryError(err?.message ?? "Failed to load history");
@@ -164,11 +339,11 @@ const App: React.FC = () => {
     setResultsError(null);
     try {
       const res = await fetch(
-        `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/results?limit=200`
+        `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/results?limit=200`,
+        { cache: "no-store" }
       );
-      if (!res.ok) {
-        throw new Error(`Request failed: ${res.status}`);
-      }
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+
       const data: ScanResultsResponse = await res.json();
       setResults(data.results);
       setSelectedRunId(runId);
@@ -179,11 +354,65 @@ const App: React.FC = () => {
     }
   }
 
+  useEffect(() => {
+    if (!selectedSiteId) {
+      stopPolling();
+      return;
+    }
+
+    const shouldLive = !!activeRunId || isSelectedRunInProgress;
+
+    if (shouldLive) startPolling(selectedRun?.id ?? undefined);
+    else stopPolling();
+
+    return () => stopPolling();
+  }, [selectedSiteId, activeRunId, selectedRun?.id, selectedRun?.status]);
+
+  async function refreshSelectedRun(runId: string) {
+    try {
+      const res = await fetch(`${API_BASE}/scan-runs/${encodeURIComponent(runId)}`, {
+        cache: "no-store",
+      });
+      if (!res.ok) return;
+
+      const run: ScanRunSummary = await res.json();
+
+      setHistory((prev) => {
+        const idx = prev.findIndex((r) => r.id === run.id);
+        if (idx === -1) {
+          return [run, ...prev];
+        }
+        const copy = [...prev];
+        copy[idx] = run;
+        return copy;
+      });
+
+      setSelectedRunId(run.id);
+
+      if (isInProgress(run.status)) {
+        startRunStream(run.id);
+      } else {
+        setActiveRunId(null);
+        stopPolling();
+        await loadHistory(run.site_id, { preserveSelection: true });
+        await loadResults(run.id);
+      }
+    } catch {}
+  }
+
   async function handleSelectSite(site: Site) {
     if (site.id === selectedSiteId) return;
+
+    stopPolling();
+    setActiveRunId(null);
+    setHistory([]);
+    setResults([]);
+    setSelectedRunId(null);
+
     setSelectedSiteId(site.id);
     setStartUrl(site.url);
-    await loadHistory(site.id);
+
+    await loadHistory(site.id, { preserveSelection: false });
   }
 
   async function handleRunScan() {
@@ -196,9 +425,7 @@ const App: React.FC = () => {
         `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/scans`,
         {
           method: "POST",
-          headers: {
-            "content-type": "application/json",
-          },
+          headers: { "content-type": "application/json" },
           body: JSON.stringify({ startUrl }),
         }
       );
@@ -206,16 +433,40 @@ const App: React.FC = () => {
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         throw new Error(
-          `Scan trigger failed: ${res.status}${
-            text ? ` - ${text.slice(0, 200)}` : ""
-          }`
+          `Scan trigger failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`
         );
       }
 
       const data = await res.json();
-      await loadHistory(selectedSiteId);
-      if (data.scanRunId) {
-        await loadResults(data.scanRunId);
+      const scanRunId: string | undefined = data.scanRunId;
+
+      if (scanRunId) {
+        const optimistic: ScanRunSummary = {
+          id: scanRunId,
+          site_id: selectedSiteId,
+          status: "in_progress",
+          started_at: new Date().toISOString(),
+          finished_at: null,
+          start_url: startUrl,
+          total_links: 0,
+          checked_links: 0,
+          broken_links: 0,
+        };
+
+        setHistory((prev) => {
+          const without = prev.filter((r) => r.id !== scanRunId);
+          return [optimistic, ...without];
+        });
+
+        setResults([]);
+        setSelectedRunId(scanRunId);
+        setActiveRunId(scanRunId);
+
+        startRunStream(scanRunId);
+        void refreshSelectedRun(scanRunId);
+        startPolling(scanRunId);
+      } else {
+        await loadHistory(selectedSiteId, { preserveSelection: false });
       }
     } catch (err: any) {
       setTriggerError(err?.message ?? "Failed to start scan");
@@ -224,57 +475,79 @@ const App: React.FC = () => {
     }
   }
 
-  async function handleDeleteSite(site: Site) {
-    const ok = window.confirm(
-      `Delete site "${site.url}" and all its scans? This cannot be undone.`
-    );
-    if (!ok) return;
+  async function handleCreateSite() {
+    const url = newSiteUrl.trim();
+    if (!url) return;
 
+    setCreatingSite(true);
+    setCreateError(null);
     try {
-      const res = await fetch(
-        `${API_BASE}/sites/${encodeURIComponent(site.id)}`,
-        {
-          method: "DELETE",
-        }
-      );
+      const res = await fetch(`${API_BASE}/sites`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ url }),
+      });
 
-      if (!res.ok && res.status !== 404) {
+      if (!res.ok) {
         const text = await res.text().catch(() => "");
         throw new Error(
-          `Delete failed: ${res.status}${
-            text ? ` - ${text.slice(0, 200)}` : ""
-          }`
+          `Create failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`
         );
       }
 
-      const remaining = sites.filter((s) => s.id !== site.id);
-      setSites(remaining);
-
-      if (selectedSiteId === site.id) {
-        if (remaining.length > 0) {
-          const next = remaining[0];
-          setSelectedSiteId(next.id);
-          setStartUrl(next.url);
-          await loadHistory(next.id);
-        } else {
-          setSelectedSiteId(null);
-          setStartUrl("");
-          setHistory([]);
-          setSelectedRunId(null);
-          setResults([]);
-        }
-      }
+      setNewSiteUrl("");
+      await loadSites();
     } catch (err: any) {
-      alert(err?.message ?? "Failed to delete site");
+      setCreateError(err?.message ?? "Failed to create site");
+    } finally {
+      setCreatingSite(false);
     }
   }
 
-  const brokenResults = useMemo(
-    () => results.filter((r) => r.classification === "broken"),
-    [results]
-  );
+  async function handleDeleteSite(siteId: string) {
+    const site = sites.find((s) => s.id === siteId);
+    const label = site?.url ? `\n\n${site.url}` : "";
 
-  const hasSites = sites.length > 0;
+    const ok = window.confirm(`Delete this site and all scans/results?${label}`);
+    if (!ok) return;
+
+    setDeletingSiteId(siteId);
+    setDeleteError(null);
+    try {
+      const res = await fetch(`${API_BASE}/sites/${encodeURIComponent(siteId)}`, {
+        method: "DELETE",
+      });
+
+      if (res.status === 404) {
+        setDeleteError("Site not found (maybe already deleted).");
+        await loadSites();
+        return;
+      }
+
+      if (!res.ok && res.status !== 204) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Delete failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`
+        );
+      }
+
+      if (selectedSiteId === siteId) {
+        stopPolling();
+        setSelectedSiteId(null);
+        setHistory([]);
+        setResults([]);
+        setSelectedRunId(null);
+        setStartUrl("");
+        setActiveRunId(null);
+      }
+
+      await loadSites();
+    } catch (err: any) {
+      setDeleteError(err?.message ?? "Failed to delete site");
+    } finally {
+      setDeletingSiteId(null);
+    }
+  }
 
   return (
     <div
@@ -294,7 +567,6 @@ const App: React.FC = () => {
           gap: "24px",
         }}
       >
-        {/* Header */}
         <header
           style={{
             display: "flex",
@@ -305,539 +577,512 @@ const App: React.FC = () => {
         >
           <div>
             <h1 style={{ margin: 0, fontSize: "28px" }}>Link-Sentry</h1>
-            <p style={{ margin: 0, color: "#9ca3af" }}>
-              Internal dev dashboard
-            </p>
+            <p style={{ margin: 0, color: "#9ca3af" }}>Internal dev dashboard</p>
           </div>
-          <span
-            style={{
-              fontSize: "12px",
-              padding: "4px 10px",
-              borderRadius: "999px",
-              background: "#1e293b",
-              color: "#9ca3af",
-            }}
-          >
-            api: http://localhost:3001
-          </span>
+
+          <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+            <button
+              onClick={() => scansRef.current?.scrollIntoView({ behavior: "smooth" })}
+              style={{
+                padding: "6px 10px",
+                borderRadius: "999px",
+                border: "1px solid #334155",
+                background: "#020617",
+                color: "#e5e7eb",
+                cursor: "pointer",
+                fontSize: "12px",
+              }}
+            >
+              Twiddle Scan
+            </button>
+
+            <span
+              style={{
+                fontSize: "12px",
+                padding: "4px 10px",
+                borderRadius: "999px",
+                background: "#1e293b",
+                color: "#9ca3af",
+              }}
+            >
+              api: http://localhost:3001
+            </span>
+          </div>
         </header>
 
-        {/* Empty state when there are no sites */}
-        {!hasSites && !sitesLoading && (
+        <section
+          style={{
+            display: "grid",
+            gridTemplateColumns: "1.2fr 1.8fr 2fr",
+            gap: "16px",
+            alignItems: "flex-start",
+          }}
+        >
           <div
             style={{
               background: "#020617",
               borderRadius: "16px",
-              padding: "24px",
+              padding: "16px",
               border: "1px solid #1e293b",
-              textAlign: "center",
             }}
           >
-            <h2 style={{ marginTop: 0, marginBottom: "8px", fontSize: "18px" }}>
-              No sites yet
-            </h2>
-            <p style={{ margin: 0, color: "#9ca3af", fontSize: "14px" }}>
-              Use the API to create a site, then it will appear here for
-              scanning.
-            </p>
-          </div>
-        )}
+            <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "18px" }}>Sites</h2>
 
-        {sitesLoading && (
-          <p style={{ fontSize: "14px" }}>Loading sites...</p>
-        )}
-        {sitesError && (
-          <p style={{ color: "#f97316", fontSize: "13px" }}>{sitesError}</p>
-        )}
+            {sitesLoading && <p style={{ fontSize: "14px" }}>Loading sites...</p>}
+            {sitesError && <p style={{ color: "#f97316", fontSize: "13px" }}>{sitesError}</p>}
 
-        {/* Only show main panels when we actually have at least one site */}
-        {hasSites && (
-          <>
-            {/* Top section: sites + config + selected scan */}
-            <section
+            {!sitesLoading && sites.length === 0 && !sitesError && (
+              <p style={{ fontSize: "14px", color: "#9ca3af" }}>
+                No sites yet — add one on the right.
+              </p>
+            )}
+
+            <div
               style={{
-                display: "grid",
-                gridTemplateColumns: "1.5fr 1.8fr 2fr",
-                gap: "16px",
-                alignItems: "flex-start",
+                display: "flex",
+                flexDirection: "column",
+                gap: "8px",
+                maxHeight: "260px",
+                overflowY: "auto",
               }}
             >
-              {/* Sites list */}
-              <div
-                style={{
-                  background: "#020617",
-                  borderRadius: "16px",
-                  padding: "16px",
-                  border: "1px solid #1e293b",
-                }}
-              >
-                <h2
-                  style={{
-                    marginTop: 0,
-                    marginBottom: "12px",
-                    fontSize: "18px",
-                  }}
-                >
-                  Sites
-                </h2>
-                <div
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "8px",
-                    maxHeight: "260px",
-                    overflowY: "auto",
-                  }}
-                >
-                  {sites.map((site) => {
-                    const isSelected = site.id === selectedSiteId;
-                    return (
-                      <div
-                        key={site.id}
-                        style={{
-                          display: "flex",
-                          alignItems: "stretch",
-                          gap: "8px",
-                        }}
-                      >
-                        <button
-                          onClick={() => handleSelectSite(site)}
-                          style={{
-                            flex: 1,
-                            textAlign: "left",
-                            borderRadius: "12px",
-                            border: "1px solid #1e293b",
-                            padding: "8px 10px",
-                            background: isSelected ? "#111827" : "#020617",
-                            color: "#e5e7eb",
-                            cursor: "pointer",
-                          }}
-                        >
-                          <div
-                            style={{ fontSize: "14px", fontWeight: 500 }}
-                          >
-                            {site.url}
-                          </div>
-                          <div
-                            style={{
-                              fontSize: "11px",
-                              color: "#9ca3af",
-                              marginTop: "2px",
-                            }}
-                          >
-                            created {formatDate(site.created_at)}
-                          </div>
-                        </button>
-                        <button
-                          onClick={() => handleDeleteSite(site)}
-                          style={{
-                            borderRadius: "12px",
-                            border: "1px solid #7f1d1d",
-                            background: "#111827",
-                            color: "#fecaca",
-                            padding: "0 10px",
-                            cursor: "pointer",
-                          }}
-                          title="Delete site"
-                        >
-                          ✕
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
+              {sites.map((site) => {
+                const isSelected = site.id === selectedSiteId;
+                const isDeleting = deletingSiteId === site.id;
 
-              {/* Site configuration */}
-              <div
-                style={{
-                  background: "#020617",
-                  borderRadius: "16px",
-                  padding: "16px",
-                  border: "1px solid #1e293b",
-                }}
-              >
-                <h2
-                  style={{
-                    marginTop: 0,
-                    marginBottom: "12px",
-                    fontSize: "18px",
-                  }}
-                >
-                  Site configuration
-                </h2>
-                {!selectedSiteId && (
-                  <p style={{ fontSize: "14px", color: "#9ca3af" }}>
-                    Select a site from the list to configure and scan.
-                  </p>
-                )}
-                {selectedSiteId && (
+                return (
                   <div
+                    key={site.id}
                     style={{
+                      borderRadius: "12px",
+                      border: "1px solid #1e293b",
+                      background: isSelected ? "#111827" : "#020617",
+                      padding: "8px 10px",
                       display: "flex",
                       flexDirection: "column",
-                      gap: "10px",
+                      gap: "6px",
                     }}
                   >
-                    <label style={{ fontSize: "14px" }}>
-                      Start URL
-                      <input
-                        value={startUrl}
-                        onChange={(e) => setStartUrl(e.target.value)}
-                        style={{
-                          marginTop: "4px",
-                          width: "100%",
-                          padding: "6px 8px",
-                          borderRadius: "8px",
-                          border: "1px solid #334155",
-                          background: "#020617",
-                          color: "#e5e7eb",
-                        }}
-                      />
-                    </label>
                     <button
-                      onClick={handleRunScan}
-                      disabled={
-                        triggeringScan || !selectedSiteId || !startUrl.trim()
-                      }
+                      onClick={() => handleSelectSite(site)}
                       style={{
-                        marginTop: "8px",
-                        padding: "8px 12px",
-                        borderRadius: "999px",
+                        textAlign: "left",
                         border: "none",
-                        background: triggeringScan ? "#4b5563" : "#22c55e",
-                        color: "#020617",
-                        fontWeight: 600,
-                        cursor:
-                          triggeringScan ||
-                          !selectedSiteId ||
-                          !startUrl.trim()
-                            ? "not-allowed"
-                            : "pointer",
+                        background: "transparent",
+                        color: "#e5e7eb",
+                        cursor: "pointer",
+                        padding: 0,
                       }}
                     >
-                      {triggeringScan ? "Running scan..." : "Run new scan"}
+                      <div style={{ fontSize: "14px", fontWeight: 500 }}>{site.url}</div>
+                      <div style={{ fontSize: "11px", color: "#9ca3af", marginTop: "2px" }}>
+                        created {formatDate(site.created_at)}
+                      </div>
                     </button>
-                    {triggerError && (
-                      <p style={{ color: "#f97316", fontSize: "13px" }}>
-                        {triggerError}
-                      </p>
+
+                    <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                      <button
+                        onClick={() => handleDeleteSite(site.id)}
+                        disabled={isDeleting}
+                        style={{
+                          padding: "6px 10px",
+                          borderRadius: "999px",
+                          border: "1px solid #7f1d1d",
+                          background: isDeleting ? "#4b5563" : "#111827",
+                          color: "#fca5a5",
+                          cursor: isDeleting ? "not-allowed" : "pointer",
+                          fontSize: "12px",
+                        }}
+                      >
+                        {isDeleting ? "Deleting..." : "Delete"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {deleteError && (
+              <p style={{ color: "#f97316", fontSize: "13px", marginTop: "10px" }}>{deleteError}</p>
+            )}
+          </div>
+
+          <div
+            style={{
+              background: "#020617",
+              borderRadius: "16px",
+              padding: "16px",
+              border: "1px solid #1e293b",
+              display: "flex",
+              flexDirection: "column",
+              gap: "16px",
+            }}
+          >
+            <div>
+              <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "18px" }}>Add site</h2>
+
+              <label style={{ fontSize: "14px" }}>
+                Site URL
+                <input
+                  value={newSiteUrl}
+                  onChange={(e) => setNewSiteUrl(e.target.value)}
+                  placeholder="https://example.com"
+                  style={{
+                    marginTop: "4px",
+                    width: "100%",
+                    padding: "6px 8px",
+                    borderRadius: "8px",
+                    border: "1px solid #334155",
+                    background: "#020617",
+                    color: "#e5e7eb",
+                  }}
+                />
+              </label>
+
+              <button
+                onClick={handleCreateSite}
+                disabled={creatingSite || !newSiteUrl.trim()}
+                style={{
+                  marginTop: "10px",
+                  padding: "8px 12px",
+                  borderRadius: "999px",
+                  border: "none",
+                  background: creatingSite ? "#4b5563" : "#60a5fa",
+                  color: "#020617",
+                  fontWeight: 700,
+                  cursor: creatingSite || !newSiteUrl.trim() ? "not-allowed" : "pointer",
+                }}
+              >
+                {creatingSite ? "Adding..." : "Add site"}
+              </button>
+
+              {createError && (
+                <p style={{ color: "#f97316", fontSize: "13px", marginTop: "10px" }}>{createError}</p>
+              )}
+            </div>
+
+            <div>
+              <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "18px" }}>
+                Site configuration
+              </h2>
+
+              {!hasSites && (
+                <p style={{ fontSize: "14px", color: "#9ca3af" }}>
+                  Add a site first to run scans.
+                </p>
+              )}
+
+              {hasSites && selectedSiteId && (
+                <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                  <label style={{ fontSize: "14px" }}>
+                    Start URL
+                    <input
+                      value={startUrl}
+                      onChange={(e) => setStartUrl(e.target.value)}
+                      style={{
+                        marginTop: "4px",
+                        width: "100%",
+                        padding: "6px 8px",
+                        borderRadius: "8px",
+                        border: "1px solid #334155",
+                        background: "#020617",
+                        color: "#e5e7eb",
+                      }}
+                    />
+                  </label>
+
+                  <button
+                    onClick={handleRunScan}
+                    disabled={triggeringScan || !startUrl.trim()}
+                    style={{
+                      marginTop: "8px",
+                      padding: "8px 12px",
+                      borderRadius: "999px",
+                      border: "none",
+                      background: triggeringScan ? "#4b5563" : "#22c55e",
+                      color: "#020617",
+                      fontWeight: 700,
+                      cursor: triggeringScan || !startUrl.trim() ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    {triggeringScan ? "Running scan..." : "Run new scan"}
+                  </button>
+
+                  {triggerError && <p style={{ color: "#f97316", fontSize: "13px" }}>{triggerError}</p>}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div
+            style={{
+              background: "#020617",
+              borderRadius: "16px",
+              padding: "16px",
+              border: "1px solid #1e293b",
+            }}
+          >
+            <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "18px" }}>Selected scan</h2>
+
+            {!hasSites && (
+              <p style={{ fontSize: "14px", color: "#9ca3af" }}>
+                Add a site to view scan history.
+              </p>
+            )}
+
+            {hasSites && historyLoading && <p>Loading history...</p>}
+            {hasSites && historyError && (
+              <p style={{ color: "#f97316", fontSize: "13px" }}>{historyError}</p>
+            )}
+            {hasSites && !historyLoading && !selectedRun && !historyError && (
+              <p style={{ fontSize: "14px", color: "#9ca3af" }}>
+                No scans found for this site yet.
+              </p>
+            )}
+
+            {hasSites && selectedRun && (
+              <div style={{ display: "grid", gap: "6px", fontSize: "14px" }}>
+                <div>
+                  <span style={{ color: "#9ca3af" }}>Run ID</span>
+                  <div style={{ fontFamily: "monospace" }}>{selectedRun.id}</div>
+                </div>
+
+                <div>
+                  <span style={{ color: "#9ca3af" }}>Status</span>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <span>{selectedRun.status}</span>
+                    {isInProgress(selectedRun.status) && (
+                      <span
+                        style={{
+                          fontSize: "12px",
+                          padding: "2px 8px",
+                          borderRadius: "999px",
+                          background: "#1e293b",
+                          color: "#93c5fd",
+                        }}
+                      >
+                        Running…
+                      </span>
                     )}
                   </div>
-                )}
-              </div>
+                </div>
 
-              {/* Selected scan */}
-              <div
-                style={{
-                  background: "#020617",
-                  borderRadius: "16px",
-                  padding: "16px",
-                  border: "1px solid #1e293b",
-                }}
-              >
-                <h2
-                  style={{
-                    marginTop: 0,
-                    marginBottom: "12px",
-                    fontSize: "18px",
-                  }}
-                >
-                  Selected scan
-                </h2>
-                {historyLoading && <p>Loading history...</p>}
-                {historyError && (
-                  <p style={{ color: "#f97316", fontSize: "13px" }}>
-                    {historyError}
-                  </p>
-                )}
-                {!historyLoading && !selectedRun && !historyError && (
-                  <p style={{ fontSize: "14px", color: "#9ca3af" }}>
-                    No scans found for this site yet.
-                  </p>
-                )}
-                {selectedRun && (
-                  <div
-                    style={{
-                      display: "grid",
-                      gap: "6px",
-                      fontSize: "14px",
-                    }}
-                  >
-                    <div>
-                      <span style={{ color: "#9ca3af" }}>Run ID</span>
-                      <div style={{ fontFamily: "monospace" }}>
-                        {selectedRun.id}
-                      </div>
-                    </div>
-                    <div>
-                      <span style={{ color: "#9ca3af" }}>Status</span>
-                      <div>{selectedRun.status}</div>
-                    </div>
-                    <div>
-                      <span style={{ color: "#9ca3af" }}>Started</span>
-                      <div>{formatDate(selectedRun.started_at)}</div>
-                    </div>
-                    <div>
-                      <span style={{ color: "#9ca3af" }}>Finished</span>
-                      <div>
-                        {selectedRun.finished_at
-                          ? formatDate(selectedRun.finished_at)
-                          : "in progress"}
-                      </div>
-                    </div>
-                    <div>
-                      <span style={{ color: "#9ca3af" }}>Links</span>
-                      <div>
-                        total {selectedRun.total_links}, checked{" "}
-                        {selectedRun.checked_links}, broken{" "}
-                        {selectedRun.broken_links} (
-                        {percentBroken(
-                          selectedRun.checked_links ||
-                            selectedRun.total_links,
-                          selectedRun.broken_links
-                        )}
-                        )
-                      </div>
-                    </div>
+                <div>
+                  <span style={{ color: "#9ca3af" }}>Started</span>
+                  <div>{formatDate(selectedRun.started_at)}</div>
+                </div>
+
+                <div>
+                  <span style={{ color: "#9ca3af" }}>Finished</span>
+                  <div>{selectedRun.finished_at ? formatDate(selectedRun.finished_at) : "in progress"}</div>
+                </div>
+
+                <div>
+                  <span style={{ color: "#9ca3af" }}>Links</span>
+                  <div>
+                    total {selectedRun.total_links}, checked {selectedRun.checked_links}, broken{" "}
+                    {selectedRun.broken_links} (
+                    {percentBroken(
+                      selectedRun.checked_links || selectedRun.total_links,
+                      selectedRun.broken_links
+                    )}
+                    )
                   </div>
-                )}
-              </div>
-            </section>
 
-            {/* Bottom section: recent scans + broken links */}
-            <section
+                  {isInProgress(selectedRun.status) && (
+                    <div style={{ marginTop: "6px", fontSize: "12px", color: "#9ca3af" }}>
+                      {selectedRun.total_links > 0 ? (
+                        <>
+                          progress {progressPercent(selectedRun.checked_links, selectedRun.total_links)} (
+                          {selectedRun.checked_links}/{selectedRun.total_links})
+                        </>
+                      ) : (
+                        <>discovering links…</>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <div ref={scansRef} />
+
+        <section
+          style={{
+            display: hasSites ? "grid" : "none",
+            gridTemplateColumns: "1.7fr 2.3fr",
+            gap: "16px",
+            alignItems: "flex-start",
+          }}
+        >
+          <div
+            style={{
+              background: "#020617",
+              borderRadius: "16px",
+              padding: "16px",
+              border: "1px solid #1e293b",
+              overflow: "hidden",
+            }}
+          >
+            <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "18px" }}>Recent scans</h2>
+
+            <div
               style={{
-                display: "grid",
-                gridTemplateColumns: "1.7fr 2.3fr",
-                gap: "16px",
-                alignItems: "flex-start",
+                maxHeight: "260px",
+                overflowY: "auto",
+                borderRadius: "12px",
+                border: "1px solid #1e293b",
               }}
             >
-              {/* Recent scans */}
-              <div
-                style={{
-                  background: "#020617",
-                  borderRadius: "16px",
-                  padding: "16px",
-                  border: "1px solid #1e293b",
-                  overflow: "hidden",
-                }}
-              >
-                <h2
-                  style={{
-                    marginTop: 0,
-                    marginBottom: "12px",
-                    fontSize: "18px",
-                  }}
-                >
-                  Recent scans
-                </h2>
-                <div
-                  style={{
-                    maxHeight: "260px",
-                    overflowY: "auto",
-                    borderRadius: "12px",
-                    border: "1px solid #1e293b",
-                  }}
-                >
-                  <table
-                    style={{
-                      width: "100%",
-                      borderCollapse: "collapse",
-                      fontSize: "13px",
-                    }}
-                  >
-                    <thead
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+                <thead style={{ position: "sticky", top: 0, background: "#020617", zIndex: 1 }}>
+                  <tr>
+                    <th
                       style={{
-                        position: "sticky",
-                        top: 0,
-                        background: "#020617",
-                        zIndex: 1,
+                        textAlign: "left",
+                        padding: "6px 8px",
+                        borderBottom: "1px solid #1e293b",
+                        color: "#9ca3af",
+                        fontWeight: 500,
                       }}
                     >
-                      <tr>
-                        <th
-                          style={{
-                            textAlign: "left",
-                            padding: "6px 8px",
-                            borderBottom: "1px solid #1e293b",
-                            color: "#9ca3af",
-                            fontWeight: 500,
-                          }}
-                        >
-                          Started
-                        </th>
-                        <th
-                          style={{
-                            textAlign: "left",
-                            padding: "6px 8px",
-                            borderBottom: "1px solid #1e293b",
-                            color: "#9ca3af",
-                            fontWeight: 500,
-                          }}
-                        >
-                          Status
-                        </th>
-                        <th
-                          style={{
-                            textAlign: "right",
-                            padding: "6px 8px",
-                            borderBottom: "1px solid #1e293b",
-                            color: "#9ca3af",
-                            fontWeight: 500,
-                          }}
-                        >
-                          Links
-                        </th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {history.map((run) => {
-                        const isSelected = run.id === selectedRunId;
-                        const brokenPct = percentBroken(
-                          run.checked_links || run.total_links,
-                          run.broken_links
-                        );
-                        return (
-                          <tr
-                            key={run.id}
-                            onClick={() => {
-                              setSelectedRunId(run.id);
-                              void loadResults(run.id);
-                            }}
-                            style={{
-                              cursor: "pointer",
-                              background: isSelected
-                                ? "#0f172a"
-                                : "transparent",
-                            }}
-                          >
-                            <td
-                              style={{
-                                padding: "6px 8px",
-                                borderBottom: "1px solid #0f172a",
-                              }}
-                            >
-                              {formatDate(run.started_at)}
-                            </td>
-                            <td
-                              style={{
-                                padding: "6px 8px",
-                                borderBottom: "1px solid #0f172a",
-                              }}
-                            >
-                              {run.status}
-                            </td>
-                            <td
-                              style={{
-                                padding: "6px 8px",
-                                borderBottom: "1px solid #0f172a",
-                                textAlign: "right",
-                              }}
-                            >
-                              {run.broken_links} broken ({brokenPct})
-                            </td>
-                          </tr>
-                        );
-                      })}
-                      {history.length === 0 && !historyLoading && (
-                        <tr>
-                          <td
-                            colSpan={3}
-                            style={{
-                              padding: "10px",
-                              textAlign: "center",
-                              color: "#6b7280",
-                            }}
-                          >
-                            No scans yet.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
-              </div>
+                      Started
+                    </th>
+                    <th
+                      style={{
+                        textAlign: "left",
+                        padding: "6px 8px",
+                        borderBottom: "1px solid #1e293b",
+                        color: "#9ca3af",
+                        fontWeight: 500,
+                      }}
+                    >
+                      Status
+                    </th>
+                    <th
+                      style={{
+                        textAlign: "right",
+                        padding: "6px 8px",
+                        borderBottom: "1px solid #1e293b",
+                        color: "#9ca3af",
+                        fontWeight: 500,
+                      }}
+                    >
+                      Links
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {history.map((run) => {
+                    const isSelected = run.id === pinnedRunId;
+                    const brokenPct = percentBroken(run.checked_links || run.total_links, run.broken_links);
 
-              {/* Broken links */}
-              <div
-                style={{
-                  background: "#020617",
-                  borderRadius: "16px",
-                  padding: "16px",
-                  border: "1px solid #1e293b",
-                }}
-              >
-                <h2
-                  style={{
-                    marginTop: 0,
-                    marginBottom: "12px",
-                    fontSize: "18px",
-                  }}
-                >
-                  Broken links in selected scan
-                </h2>
-                {resultsLoading && <p>Loading results...</p>}
-                {resultsError && (
-                  <p style={{ color: "#f97316", fontSize: "13px" }}>
-                    {resultsError}
-                  </p>
-                )}
-                {!resultsLoading && brokenResults.length === 0 && (
-                  <p style={{ fontSize: "14px", color: "#9ca3af" }}>
-                    No broken links in this scan.
-                  </p>
-                )}
+                    return (
+                      <tr
+                        key={run.id}
+                        onClick={() => {
+                          setActiveRunId(null);
+                          setSelectedRunId(run.id);
+                          if (!isInProgress(run.status)) void loadResults(run.id);
+                          else {
+                            setActiveRunId(run.id);
+                            startRunStream(run.id);
+                            startPolling(run.id);
+                            void refreshSelectedRun(run.id);
+                          }
+                        }}
+                        style={{
+                          cursor: "pointer",
+                          background: isSelected ? "#0f172a" : "transparent",
+                        }}
+                      >
+                        <td style={{ padding: "6px 8px", borderBottom: "1px solid #0f172a" }}>
+                          {formatDate(run.started_at)}
+                        </td>
+                        <td style={{ padding: "6px 8px", borderBottom: "1px solid #0f172a" }}>
+                          {run.status}
+                        </td>
+                        <td
+                          style={{
+                            padding: "6px 8px",
+                            borderBottom: "1px solid #0f172a",
+                            textAlign: "right",
+                          }}
+                        >
+                          {run.broken_links} broken ({brokenPct})
+                        </td>
+                      </tr>
+                    );
+                  })}
+
+                  {history.length === 0 && !historyLoading && (
+                    <tr>
+                      <td colSpan={3} style={{ padding: "10px", textAlign: "center", color: "#6b7280" }}>
+                        No scans yet.
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div
+            style={{
+              background: "#020617",
+              borderRadius: "16px",
+              padding: "16px",
+              border: "1px solid #1e293b",
+            }}
+          >
+            <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "18px" }}>
+              Broken links in selected scan
+            </h2>
+
+            {resultsLoading && <p>Loading results...</p>}
+            {resultsError && <p style={{ color: "#f97316", fontSize: "13px" }}>{resultsError}</p>}
+            {!resultsLoading && brokenResults.length === 0 && (
+              <p style={{ fontSize: "14px", color: "#9ca3af" }}>
+                {isSelectedRunInProgress ? "Scan still running…" : "No broken links in this scan."}
+              </p>
+            )}
+
+            <div
+              style={{
+                maxHeight: "260px",
+                overflowY: "auto",
+                display: "flex",
+                flexDirection: "column",
+                gap: "8px",
+              }}
+            >
+              {brokenResults.map((row) => (
                 <div
+                  key={row.id}
                   style={{
-                    maxHeight: "260px",
-                    overflowY: "auto",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "8px",
+                    padding: "8px 10px",
+                    borderRadius: "10px",
+                    border: "1px solid #7f1d1d",
+                    background: "#111827",
                   }}
                 >
-                  {brokenResults.map((row) => (
-                    <div
-                      key={row.id}
-                      style={{
-                        padding: "8px 10px",
-                        borderRadius: "10px",
-                        border: "1px solid #7f1d1d",
-                        background: "#111827",
-                      }}
-                    >
-                      <div
-                        style={{
-                          fontSize: "13px",
-                          color: "#fca5a5",
-                          marginBottom: "4px",
-                        }}
-                      >
-                        {row.link_url}
-                      </div>
-                      <div style={{ fontSize: "12px", color: "#9ca3af" }}>
-                        status {row.status_code ?? "null"} ·{" "}
-                        {row.classification}
-                        {row.error_message ? ` · ${row.error_message}` : ""}
-                      </div>
-                      <div
-                        style={{
-                          fontSize: "11px",
-                          color: "#6b7280",
-                          marginTop: "2px",
-                        }}
-                      >
-                        source: {row.source_page}
-                      </div>
-                    </div>
-                  ))}
+                  <div style={{ fontSize: "13px", color: "#fca5a5", marginBottom: "4px" }}>
+                    {row.link_url}
+                  </div>
+                  <div style={{ fontSize: "12px", color: "#9ca3af" }}>
+                    status {row.status_code ?? "null"} · {row.classification}
+                    {row.error_message ? ` · ${row.error_message}` : ""}
+                  </div>
+                  <div style={{ fontSize: "11px", color: "#6b7280", marginTop: "2px" }}>
+                    source: {row.source_page}
+                  </div>
                 </div>
-              </div>
-            </section>
-          </>
-        )}
+              ))}
+            </div>
+          </div>
+        </section>
       </div>
     </div>
   );

@@ -74,3 +74,30 @@ export async function getRecentScansForSite(
 
   return res.rows;
 }
+
+export async function getScanRunById(
+  scanRunId: string
+): Promise<ScanRunRow | null> {
+  const client = await ensureConnected();
+
+  const res = await client.query<ScanRunRow>(
+    `
+      SELECT
+        id,
+        site_id,
+        status,
+        started_at,
+        finished_at,
+        start_url,
+        total_links,
+        checked_links,
+        broken_links
+      FROM scan_runs
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [scanRunId]
+  );
+
+  return res.rows[0] ?? null;
+}

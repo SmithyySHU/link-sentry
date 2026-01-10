@@ -4,20 +4,26 @@ import cors from "cors";
 import {
   getLatestScanForSite,
   getRecentScansForSite,
-} from "../../../packages/db/src/scans.js";
+  getScanRunById,
+} from "../../../packages/db/src/scans";
+
 import {
   getSitesForUser,
-  getAllSites,
   getSiteById,
   createSite,
   deleteSite,
 } from "../../../packages/db/src/sites.js";
+
 import { getResultsForScanRun } from "../../../packages/db/src/scanResults.js";
 import { runScanForSite } from "../../../packages/crawler/src/scanService.js";
+
+import { mountScanRunEvents } from "./routes/scanRunEvents";
 
 const DEMO_USER_ID = "00000000-0000-0000-0000-000000000000";
 
 const app = express();
+
+mountScanRunEvents(app);
 
 app.use(cors());
 app.use(express.json());
@@ -57,7 +63,7 @@ app.get("/sites/:siteId/scans", async (req, res) => {
   }
 
   try {
-    const scans = await (getRecentScansForSite as any)(siteId, limit);
+    const scans = await getRecentScansForSite(siteId, limit);
 
     res.json({
       siteId,
@@ -88,6 +94,27 @@ app.get("/sites/:siteId/scans/latest", async (req, res) => {
   } catch (err) {
     console.error("Error in GET /sites/:siteId/scans/latest", err);
     res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// NEW: Get a scan run by id (live progress polling)
+app.get("/scan-runs/:scanRunId", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+
+  try {
+    const run = await getScanRunById(scanRunId);
+
+    if (!run) {
+      return res.status(404).json({
+        error: "scan_run_not_found",
+        message: `No scan run found with id ${scanRunId}`,
+      });
+    }
+
+    return res.json(run);
+  } catch (err) {
+    console.error("Error in GET /scan-runs/:scanRunId", err);
+    return res.status(500).json({ error: "internal_error" });
   }
 });
 
@@ -176,13 +203,36 @@ app.get("/scan-runs/:scanRunId/results", async (req, res) => {
   }
 });
 
+// Get a single scan run by id (for live progress)
+app.get("/scan-runs/:scanRunId", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+
+  try {
+    // We can fetch it via scan_results table? No — better from scan_runs.
+    // So we need a DB helper in scans.js (Step 2 below).
+    const run = await (getScanRunById as any)(scanRunId);
+
+    if (!run) {
+      return res.status(404).json({
+        error: "scan_run_not_found",
+        message: `No scan run found with id ${scanRunId}`,
+      });
+    }
+
+    return res.json(run);
+  } catch (err) {
+    console.error("Error in GET /scan-runs/:scanRunId", err);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
+
+
 // Delete a site (and its scans/results)
 app.delete("/sites/:siteId", async (req, res) => {
   const siteId = req.params.siteId;
   const userId = (req.query.userId as string) ?? DEMO_USER_ID;
 
   try {
-    // Ensure the site belongs to this user
     const site = await getSiteById(siteId);
     if (!site || site.user_id !== userId) {
       return res.status(404).json({
