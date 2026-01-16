@@ -90,8 +90,9 @@ export async function runScanForSite(
   startUrl: string,
   scanRunId?: string
 ): Promise<ScanExecutionSummary> {
-  // If scanRunId is not provided, create a new one
-  const actualScanRunId = scanRunId ?? (await createScanRun(siteId, startUrl));
+  // ✅ IMPORTANT: force this to be a real string (fixes TS errors)
+  const actualScanRunId: string =
+    scanRunId ?? (await createScanRun(siteId, startUrl));
 
   const MAX_PAGES = 25;
   const MAX_DEPTH = 2;
@@ -187,8 +188,9 @@ export async function runScanForSite(
   const insertOccurrence = async (sourcePage: string, linkUrl: string) => {
     const v = await getValidation(linkUrl);
 
+    // ✅ FIX: always use actualScanRunId (never the optional scanRunId param)
     await insertScanResult({
-      scanRunId,
+      scanRunId: actualScanRunId,
       sourcePage,
       linkUrl,
       statusCode: v.status,
@@ -221,9 +223,7 @@ export async function runScanForSite(
         scheduleProgressWrite(discoveredLinks.size);
       }
 
-      occurrenceTasks.push(
-        limitInsert(() => insertOccurrence(pageUrl, linkUrl))
-      );
+      occurrenceTasks.push(limitInsert(() => insertOccurrence(pageUrl, linkUrl)));
 
       try {
         const u = new URL(linkUrl);
@@ -241,7 +241,8 @@ export async function runScanForSite(
   };
 
   try {
-    await updateScanRunProgress(scanRunId, {
+    // ✅ FIX: use actualScanRunId
+    await updateScanRunProgress(actualScanRunId, {
       totalLinks: 0,
       checkedLinks: 0,
       brokenLinks: 0,
@@ -271,7 +272,6 @@ export async function runScanForSite(
     }
 
     await Promise.allSettled(occurrenceTasks);
-
     await Promise.allSettled(Array.from(validationMap.values()));
     await flushProgressWrite(discoveredLinks.size);
 

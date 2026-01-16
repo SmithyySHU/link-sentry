@@ -17,7 +17,7 @@ import {
   deleteSite,
 } from "../../../packages/db/src/sites.js";
 
-import { getResultsForScanRun } from "../../../packages/db/src/scanResults.js";
+import { getResultsForScanRun, getResultsSummaryForScanRun } from "../../../packages/db/src/scanResults.js";
 import { runScanForSite } from "../../../packages/crawler/src/scanService.js";
 
 import { mountScanRunEvents } from "./routes/scanRunEvents";
@@ -228,6 +228,23 @@ app.get("/scan-runs/:scanRunId/results", async (req, res) => {
     });
   } catch (err) {
     console.error("Error in GET /scan-runs/:scanRunId/results", err);
+    res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// Get results summary (counts by classification + status_code)
+app.get("/scan-runs/:scanRunId/results/summary", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+
+  try {
+    const summary = await getResultsSummaryForScanRun(scanRunId);
+
+    res.json({
+      scanRunId,
+      summary,
+    });
+  } catch (err) {
+    console.error("Error in GET /scan-runs/:scanRunId/results/summary", err);
     res.status(500).json({ error: "internal_error" });
   }
 });

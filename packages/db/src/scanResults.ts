@@ -76,11 +76,43 @@ export async function getResultsForScanRun(
         created_at
       FROM scan_results
       WHERE scan_run_id = $1
-      ORDER BY created_at ASC
+      ORDER BY
+        (classification <> 'ok') DESC,
+        created_at DESC
       LIMIT $2 OFFSET $3
     `,
     [scanRunId, limit, offset]
   );
 
   return res.rows;
+}
+export interface ResultsSummary {
+  classification: LinkClassification;
+  status_code: number | null;
+  count: number;
+}
+
+export async function getResultsSummaryForScanRun(
+  scanRunId: string
+): Promise<ResultsSummary[]> {
+  const client = await ensureConnected();
+
+  const res = await client.query<ResultsSummary>(
+    `
+      SELECT
+        classification,
+        status_code,
+        COUNT(*) as count
+      FROM scan_results
+      WHERE scan_run_id = $1
+      GROUP BY classification, status_code
+      ORDER BY classification, status_code
+    `,
+    [scanRunId]
+  );
+
+  return res.rows.map((row) => ({
+    ...row,
+    count: Number(row.count),
+  }));
 }

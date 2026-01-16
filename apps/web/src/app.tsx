@@ -104,6 +104,8 @@ const App: React.FC = () => {
   const [results, setResults] = useState<ScanResultRow[]>([]);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [resultsError, setResultsError] = useState<string | null>(null);
+  const [resultsOffset, setResultsOffset] = useState(0);
+  const [resultsHasMore, setResultsHasMore] = useState(false);
 
   const [startUrl, setStartUrl] = useState("");
   const [triggeringScan, setTriggeringScan] = useState(false);
@@ -145,6 +147,11 @@ const App: React.FC = () => {
 
   const brokenResults = useMemo(
     () => results.filter((r) => r.classification === "broken"),
+    [results]
+  );
+
+  const blockedResults = useMemo(
+    () => results.filter((r) => r.classification === "blocked"),
     [results]
   );
 
@@ -307,20 +314,46 @@ const App: React.FC = () => {
   async function loadResults(runId: string) {
     setResultsLoading(true);
     setResultsError(null);
+    setResultsOffset(0);
+    setResults([]);
     try {
       const res = await fetch(
-        `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/results?limit=200`,
+        `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/results?limit=50&offset=0`,
         { cache: "no-store" }
       );
       if (!res.ok) throw new Error(`Request failed: ${res.status}`);
 
       const data: ScanResultsResponse = await res.json();
       setResults(data.results);
+      setResultsOffset(50);
+      setResultsHasMore(data.results.length === 50);
 
       setSelectedRunId(runId);
       selectedRunIdRef.current = runId;
     } catch (err: any) {
       setResultsError(err?.message ?? "Failed to load scan results");
+    } finally {
+      setResultsLoading(false);
+    }
+  }
+
+  async function loadMoreResults(runId: string) {
+    if (resultsLoading) return;
+
+    setResultsLoading(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/results?limit=50&offset=${resultsOffset}`,
+        { cache: "no-store" }
+      );
+      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
+
+      const data: ScanResultsResponse = await res.json();
+      setResults((prev) => [...prev, ...data.results]);
+      setResultsOffset((prev) => prev + 50);
+      setResultsHasMore(data.results.length === 50);
+    } catch (err: any) {
+      setResultsError(err?.message ?? "Failed to load more results");
     } finally {
       setResultsLoading(false);
     }
@@ -687,6 +720,7 @@ const App: React.FC = () => {
                     border: "1px solid #334155",
                     background: "#020617",
                     color: "#e5e7eb",
+                    boxSizing: "border-box",
                   }}
                 />
               </label>
@@ -731,6 +765,7 @@ const App: React.FC = () => {
                         border: "1px solid #334155",
                         background: "#020617",
                         color: "#e5e7eb",
+                        boxSizing: "border-box",
                       }}
                     />
                   </label>
@@ -825,7 +860,7 @@ const App: React.FC = () => {
 
         <div ref={scansRef} />
 
-        <section style={{ display: hasSites ? "grid" : "none", gridTemplateColumns: "1.7fr 2.3fr", gap: "16px", alignItems: "flex-start" }}>
+        <section style={{ display: hasSites ? "grid" : "none", gridTemplateColumns: "1.7fr 1fr 1.3fr", gap: "16px", alignItems: "flex-start" }}>
           <div style={{ background: "#020617", borderRadius: "16px", padding: "16px", border: "1px solid #1e293b", overflow: "hidden" }}>
             <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "18px" }}>Recent scans</h2>
 
@@ -914,6 +949,69 @@ const App: React.FC = () => {
                 </div>
               ))}
             </div>
+            {resultsHasMore && (
+              <button
+                onClick={() => selectedRunId && loadMoreResults(selectedRunId)}
+                disabled={resultsLoading}
+                style={{
+                  marginTop: "12px",
+                  padding: "8px 16px",
+                  background: "#dc2626",
+                  color: "white",
+                  border: "none",
+                  borderRadius: "8px",
+                  cursor: resultsLoading ? "default" : "pointer",
+                  opacity: resultsLoading ? 0.6 : 1,
+                  fontSize: "13px",
+                  fontWeight: "500",
+                }}
+              >
+                {resultsLoading ? "Loading..." : "Load More"}
+              </button>
+            )}
+          </div>
+
+          <div style={{ background: "#020617", borderRadius: "16px", padding: "16px", border: "1px solid #1e293b" }}>
+            <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "18px" }}>Blocked links in selected scan</h2>
+
+            {!resultsLoading && blockedResults.length === 0 && (
+              <p style={{ fontSize: "14px", color: "#9ca3af" }}>
+                {isSelectedRunInProgress ? "Scan still running…" : "No blocked links in this scan."}
+              </p>
+            )}
+
+            <div style={{ maxHeight: "260px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "8px" }}>
+              {blockedResults.map((row) => (
+                <div key={row.id} style={{ padding: "8px 10px", borderRadius: "10px", border: "1px solid #854d0e", background: "#111827" }}>
+                  <div style={{ fontSize: "13px", color: "#fdba74", marginBottom: "4px" }}>{row.link_url}</div>
+                  <div style={{ fontSize: "12px", color: "#9ca3af" }}>
+                    status {row.status_code ?? "null"} · {row.classification}
+                    {row.error_message ? ` · ${row.error_message}` : ""}
+                  </div>
+                  <div style={{ fontSize: "11px", color: "#6b7280", marginTop: "2px" }}>source: {row.source_page}</div>
+                </div>
+              ))}
+            </div>
+            {resultsHasMore && (
+              <button
+                onClick={() => selectedRunId && loadMoreResults(selectedRunId)}
+                disabled={resultsLoading}
+                style={{
+                  marginTop: "12px",
+                  padding: "8px 16px",
+                  background: "#b45309",
+                  color: "white",
+                  border: "none",
+                  borderRadius: "8px",
+                  cursor: resultsLoading ? "default" : "pointer",
+                  opacity: resultsLoading ? 0.6 : 1,
+                  fontSize: "13px",
+                  fontWeight: "500",
+                }}
+              >
+                {resultsLoading ? "Loading..." : "Load More"}
+              </button>
+            )}
           </div>
         </section>
       </div>
