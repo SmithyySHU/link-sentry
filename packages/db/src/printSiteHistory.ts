@@ -27,7 +27,7 @@ async function main(): Promise<void> {
       WHERE site_id = $1
       ORDER BY started_at DESC
     `,
-    [siteId]
+    [siteId],
   );
 
   if (res.rowCount === 0) {
@@ -41,9 +41,7 @@ async function main(): Promise<void> {
   for (const run of res.rows) {
     const healthy = run.checked_links - run.broken_links;
     const brokenPct =
-      run.checked_links > 0
-        ? (run.broken_links / run.checked_links) * 100
-        : 0;
+      run.checked_links > 0 ? (run.broken_links / run.checked_links) * 100 : 0;
 
     console.log("--------------------------------------------------");
     console.log(`run:      ${run.id}`);
@@ -51,12 +49,12 @@ async function main(): Promise<void> {
     console.log(`url:      ${run.start_url}`);
     console.log(`started:  ${run.started_at.toISOString()}`);
     console.log(
-      `finished: ${run.finished_at ? run.finished_at.toISOString() : "in-progress"}`
+      `finished: ${run.finished_at ? run.finished_at.toISOString() : "in-progress"}`,
     );
     console.log(
       `links:    total=${run.total_links}, checked=${run.checked_links}, broken=${run.broken_links}, healthy=${healthy} (${brokenPct.toFixed(
-        1
-      )}% broken)`
+        1,
+      )}% broken)`,
     );
   }
 

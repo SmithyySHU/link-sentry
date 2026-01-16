@@ -71,13 +71,7 @@ export async function upsertScanLink(args: {
 }): Promise<ScanLink> {
   const client = await ensureConnected();
 
-  const {
-    scanRunId,
-    linkUrl,
-    classification,
-    statusCode,
-    errorMessage,
-  } = args;
+  const { scanRunId, linkUrl, classification, statusCode, errorMessage } = args;
 
   const res = await client.query<ScanLink>(
     `
@@ -97,13 +91,7 @@ export async function upsertScanLink(args: {
       updated_at = NOW()
     RETURNING *
   `,
-    [
-      scanRunId,
-      linkUrl,
-      classification,
-      statusCode,
-      errorMessage ?? null,
-    ]
+    [scanRunId, linkUrl, classification, statusCode, errorMessage ?? null],
   );
 
   return res.rows[0];
@@ -120,12 +108,7 @@ export async function insertScanLinkOccurrence(args: {
 }): Promise<ScanLinkOccurrence> {
   const client = await ensureConnected();
 
-  const {
-    scanLinkId,
-    scanRunId,
-    linkUrl,
-    sourcePage,
-  } = args;
+  const { scanLinkId, scanRunId, linkUrl, sourcePage } = args;
 
   const res = await client.query<ScanLinkOccurrence>(
     `
@@ -138,12 +121,7 @@ export async function insertScanLinkOccurrence(args: {
     VALUES ($1, $2, $3, $4)
     RETURNING *
   `,
-    [
-      scanLinkId,
-      scanRunId,
-      linkUrl,
-      sourcePage,
-    ]
+    [scanLinkId, scanRunId, linkUrl, sourcePage],
   );
 
   return res.rows[0];
@@ -161,7 +139,7 @@ export async function getScanLinksForRun(
     classification?: LinkClassification;
     statusGroup?: "all" | "no_response" | "http_error";
     includeIgnored?: boolean;
-  }
+  },
 ): Promise<{
   links: ScanLink[];
   countReturned: number;
@@ -201,7 +179,7 @@ export async function getScanLinksForRun(
       FROM scan_links
       ${whereClause}
     `,
-    params
+    params,
   );
 
   const totalMatching = Number(countRes.rows[0]?.count ?? 0);
@@ -234,7 +212,7 @@ export async function getScanLinksForRun(
         created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `,
-    [...params, limit, offset]
+    [...params, limit, offset],
   );
 
   return {
@@ -250,7 +228,7 @@ export async function getScanLinksForRun(
  */
 export async function getScanLinkOccurrences(
   scanLinkId: string,
-  options?: { limit?: number; offset?: number }
+  options?: { limit?: number; offset?: number },
 ): Promise<{
   occurrences: ScanLinkOccurrence[];
   countReturned: number;
@@ -268,7 +246,7 @@ export async function getScanLinkOccurrences(
       FROM scan_link_occurrences
       WHERE scan_link_id = $1
     `,
-    [scanLinkId]
+    [scanLinkId],
   );
 
   const totalMatching = Number(countRes.rows[0]?.count ?? 0);
@@ -288,7 +266,7 @@ export async function getScanLinkOccurrences(
       ORDER BY created_at DESC
       LIMIT $2 OFFSET $3
     `,
-    [scanLinkId, limit, offset]
+    [scanLinkId, limit, offset],
   );
 
   return {
@@ -301,13 +279,13 @@ export async function getScanLinkOccurrences(
 /**
  * Get summary counts of unique links by classification and status code.
  */
-export async function getScanLinksSummary(
-  scanRunId: string
-): Promise<Array<{
-  classification: LinkClassification;
-  status_code: number | null;
-  count: number;
-}>> {
+export async function getScanLinksSummary(scanRunId: string): Promise<
+  Array<{
+    classification: LinkClassification;
+    status_code: number | null;
+    count: number;
+  }>
+> {
   const client = await ensureConnected();
 
   const res = await client.query<{
@@ -325,7 +303,7 @@ export async function getScanLinksSummary(
       GROUP BY classification, status_code
       ORDER BY classification, status_code
     `,
-    [scanRunId]
+    [scanRunId],
   );
 
   return res.rows.map((row) => ({
@@ -337,7 +315,7 @@ export async function getScanLinksSummary(
 export async function getScanLinksForExport(
   scanRunId: string,
   classification: ExportClassification = "all",
-  limit = 5000
+  limit = 5000,
 ): Promise<ScanLinkExportRow[]> {
   const client = await ensureConnected();
 
@@ -346,7 +324,8 @@ export async function getScanLinksForExport(
 
   if (classification !== "all") {
     if (classification === "timeout") {
-      whereClause += " AND classification = 'no_response' AND status_code IS NULL AND error_message = 'timeout'";
+      whereClause +=
+        " AND classification = 'no_response' AND status_code IS NULL AND error_message = 'timeout'";
     } else {
       params.push(classification);
       whereClause += ` AND classification = $${params.length}`;
@@ -368,7 +347,7 @@ export async function getScanLinksForExport(
       ORDER BY last_seen_at DESC
       LIMIT $${params.length + 1}
     `,
-    [...params, limit]
+    [...params, limit],
   );
 
   return res.rows;
@@ -377,7 +356,7 @@ export async function getScanLinksForExport(
 export async function getTopLinksByClassification(
   scanRunId: string,
   classification: LinkClassification,
-  limit: number
+  limit: number,
 ): Promise<ScanLinkExportRow[]> {
   const client = await ensureConnected();
   const res = await client.query<ScanLinkExportRow>(
@@ -397,13 +376,15 @@ export async function getTopLinksByClassification(
       ORDER BY occurrence_count DESC, last_seen_at DESC
       LIMIT $3
     `,
-    [scanRunId, classification, limit]
+    [scanRunId, classification, limit],
   );
 
   return res.rows;
 }
 
-export async function getTimeoutCountForRun(scanRunId: string): Promise<number> {
+export async function getTimeoutCountForRun(
+  scanRunId: string,
+): Promise<number> {
   const client = await ensureConnected();
   const res = await client.query<{ count: string }>(
     `
@@ -415,14 +396,14 @@ export async function getTimeoutCountForRun(scanRunId: string): Promise<number> 
         AND status_code IS NULL
         AND error_message = 'timeout'
     `,
-    [scanRunId]
+    [scanRunId],
   );
   return Number(res.rows[0]?.count ?? 0);
 }
 
 export async function getScanLinkByRunAndUrl(
   scanRunId: string,
-  linkUrl: string
+  linkUrl: string,
 ): Promise<ScanLink | null> {
   const client = await ensureConnected();
   const res = await client.query<ScanLink>(
@@ -448,12 +429,14 @@ export async function getScanLinkByRunAndUrl(
       WHERE scan_run_id = $1 AND link_url = $2
       LIMIT 1
     `,
-    [scanRunId, linkUrl]
+    [scanRunId, linkUrl],
   );
   return res.rows[0] ?? null;
 }
 
-export async function getScanLinkById(scanLinkId: string): Promise<ScanLink | null> {
+export async function getScanLinkById(
+  scanLinkId: string,
+): Promise<ScanLink | null> {
   const client = await ensureConnected();
   const res = await client.query<ScanLink>(
     `
@@ -478,17 +461,19 @@ export async function getScanLinkById(scanLinkId: string): Promise<ScanLink | nu
       WHERE id = $1
       LIMIT 1
     `,
-    [scanLinkId]
+    [scanLinkId],
   );
   return res.rows[0] ?? null;
 }
 
-export async function listScanLinksForIgnore(scanRunId: string): Promise<Array<{
-  id: string;
-  link_url: string;
-  status_code: number | null;
-  classification: LinkClassification;
-}>> {
+export async function listScanLinksForIgnore(scanRunId: string): Promise<
+  Array<{
+    id: string;
+    link_url: string;
+    status_code: number | null;
+    classification: LinkClassification;
+  }>
+> {
   const client = await ensureConnected();
   const res = await client.query<{
     id: string;
@@ -501,7 +486,7 @@ export async function listScanLinksForIgnore(scanRunId: string): Promise<Array<{
       FROM scan_links
       WHERE scan_run_id = $1 AND ignored = false
     `,
-    [scanRunId]
+    [scanRunId],
   );
   return res.rows;
 }
@@ -510,7 +495,11 @@ export async function setScanLinkIgnoredForRun(
   scanRunId: string,
   linkUrl: string,
   ignored: boolean,
-  options?: { reason?: string; source?: "manual" | "rule" | "none"; ruleId?: string | null }
+  options?: {
+    reason?: string;
+    source?: "manual" | "rule" | "none";
+    ruleId?: string | null;
+  },
 ): Promise<void> {
   const client = await ensureConnected();
   const source = options?.source ?? (ignored ? "manual" : "none");
@@ -527,14 +516,18 @@ export async function setScanLinkIgnoredForRun(
           ignored_source = $7
       WHERE scan_run_id = $1 AND link_url = $2
     `,
-    [scanRunId, linkUrl, ignored, ruleId, ignoredAt, reason, source]
+    [scanRunId, linkUrl, ignored, ruleId, ignoredAt, reason, source],
   );
 }
 
 export async function setScanLinksIgnoredByIds(
   ids: string[],
   ignored: boolean,
-  options?: { reason?: string; source?: "manual" | "rule" | "none"; ruleId?: string | null }
+  options?: {
+    reason?: string;
+    source?: "manual" | "rule" | "none";
+    ruleId?: string | null;
+  },
 ): Promise<void> {
   if (ids.length === 0) return;
   const client = await ensureConnected();
@@ -552,7 +545,7 @@ export async function setScanLinksIgnoredByIds(
           ignored_source = $6
       WHERE id = ANY($1::uuid[])
     `,
-    [ids, ignored, ruleId, ignoredAt, reason, source]
+    [ids, ignored, ruleId, ignoredAt, reason, source],
   );
 }
 
@@ -562,7 +555,7 @@ export async function setScanLinksIgnoredByIds(
  */
 export async function getOccurrencesForScanLink(
   scanLinkId: string,
-  options?: { limit?: number; offset?: number }
+  options?: { limit?: number; offset?: number },
 ): Promise<PaginatedOccurrences> {
   const client = await ensureConnected();
 
@@ -576,7 +569,7 @@ export async function getOccurrencesForScanLink(
       FROM scan_link_occurrences
       WHERE scan_link_id = $1
     `,
-    [scanLinkId]
+    [scanLinkId],
   );
 
   const totalMatching = Number(countRes.rows[0]?.count ?? 0);
@@ -596,7 +589,7 @@ export async function getOccurrencesForScanLink(
       ORDER BY created_at ASC
       LIMIT $2 OFFSET $3
     `,
-    [scanLinkId, limit, offset]
+    [scanLinkId, limit, offset],
   );
 
   return {

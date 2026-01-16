@@ -56,13 +56,17 @@ export async function insertScanResult(args: {
       statusCode,
       classification,
       errorMessage ?? null,
-    ]
+    ],
   );
 }
 
 export async function getResultsForScanRun(
   scanRunId: string,
-  options?: { limit?: number; offset?: number; classification?: LinkClassification }
+  options?: {
+    limit?: number;
+    offset?: number;
+    classification?: LinkClassification;
+  },
 ): Promise<PaginatedResults> {
   const client = await ensureConnected();
 
@@ -73,7 +77,7 @@ export async function getResultsForScanRun(
   // Build WHERE clause
   let whereClause = "WHERE scan_run_id = $1";
   const params: Array<string | number> = [scanRunId];
-  
+
   if (classification) {
     whereClause += " AND classification = $2";
     params.push(classification);
@@ -86,7 +90,7 @@ export async function getResultsForScanRun(
       FROM scan_results
       ${whereClause}
     `,
-    params
+    params,
   );
 
   const totalMatching = Number(countRes.rows[0]?.count ?? 0);
@@ -111,7 +115,7 @@ export async function getResultsForScanRun(
         created_at DESC
       LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `,
-    [...params, limit, offset]
+    [...params, limit, offset],
   );
 
   return {
@@ -128,7 +132,7 @@ export interface ResultsSummary {
 }
 
 export async function getResultsSummaryForScanRun(
-  scanRunId: string
+  scanRunId: string,
 ): Promise<ResultsSummary[]> {
   const client = await ensureConnected();
 
@@ -143,7 +147,7 @@ export async function getResultsSummaryForScanRun(
       GROUP BY classification, status_code
       ORDER BY classification, status_code
     `,
-    [scanRunId]
+    [scanRunId],
   );
 
   return res.rows.map((row) => ({

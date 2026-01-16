@@ -23,7 +23,10 @@ export interface ScanLinkMinimalRow {
   last_seen_at: Date;
 }
 
-export async function getRecentScanRunsForSite(siteId: string, limit: number): Promise<ScanRunHistoryRow[]> {
+export async function getRecentScanRunsForSite(
+  siteId: string,
+  limit: number,
+): Promise<ScanRunHistoryRow[]> {
   const client = await ensureConnected();
   const res = await client.query<ScanRunHistoryRow>(
     `
@@ -43,12 +46,14 @@ export async function getRecentScanRunsForSite(siteId: string, limit: number): P
       ORDER BY started_at DESC
       LIMIT $2
     `,
-    [siteId, limit]
+    [siteId, limit],
   );
   return res.rows;
 }
 
-export async function getScanLinksForRunMinimal(scanRunId: string): Promise<ScanLinkMinimalRow[]> {
+export async function getScanLinksForRunMinimal(
+  scanRunId: string,
+): Promise<ScanLinkMinimalRow[]> {
   const client = await ensureConnected();
   const res = await client.query<ScanLinkMinimalRow>(
     `
@@ -63,7 +68,7 @@ export async function getScanLinksForRunMinimal(scanRunId: string): Promise<Scan
       WHERE scan_run_id = $1 AND ignored = false
       ORDER BY last_seen_at DESC
     `,
-    [scanRunId]
+    [scanRunId],
   );
   return res.rows;
 }
@@ -90,7 +95,10 @@ export async function getDiffBetweenRuns(runA: string, runB: string) {
 
   const added: ScanLinkMinimalRow[] = [];
   const removed: ScanLinkMinimalRow[] = [];
-  const changed: Array<{ before: ScanLinkMinimalRow; after: ScanLinkMinimalRow }> = [];
+  const changed: Array<{
+    before: ScanLinkMinimalRow;
+    after: ScanLinkMinimalRow;
+  }> = [];
   let unchangedCount = 0;
 
   for (const [linkUrl, rowA] of mapA.entries()) {

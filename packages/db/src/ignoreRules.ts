@@ -20,7 +20,7 @@ export interface IgnoreRule {
 
 export async function listIgnoreRulesForSite(
   siteId: string,
-  opts?: { enabledOnly?: boolean }
+  opts?: { enabledOnly?: boolean },
 ): Promise<IgnoreRule[]> {
   const client = await ensureConnected();
   const enabledOnly = opts?.enabledOnly ?? false;
@@ -31,21 +31,21 @@ export async function listIgnoreRulesForSite(
       WHERE site_id = $1 ${enabledOnly ? "AND is_enabled = true" : ""}
       ORDER BY created_at DESC
     `,
-    [siteId]
+    [siteId],
   );
   return res.rows;
 }
 
 export async function getIgnoreRulesForSite(
   siteId: string,
-  opts?: { enabledOnly?: boolean }
+  opts?: { enabledOnly?: boolean },
 ): Promise<IgnoreRule[]> {
   return listIgnoreRulesForSite(siteId, opts);
 }
 
 export async function listIgnoreRules(
   siteId?: string,
-  opts?: { enabledOnly?: boolean }
+  opts?: { enabledOnly?: boolean },
 ): Promise<IgnoreRule[]> {
   const client = await ensureConnected();
   const enabledOnly = opts?.enabledOnly ?? false;
@@ -53,7 +53,7 @@ export async function listIgnoreRules(
     const res = await client.query<IgnoreRule>(
       `SELECT id, site_id, rule_type, pattern, is_enabled, created_at FROM ignore_rules ${
         enabledOnly ? "WHERE is_enabled = true" : ""
-      } ORDER BY created_at DESC`
+      } ORDER BY created_at DESC`,
     );
     return res.rows;
   }
@@ -65,7 +65,7 @@ export async function listIgnoreRules(
       WHERE (site_id = $1 OR site_id IS NULL) ${enabledOnly ? "AND is_enabled = true" : ""}
       ORDER BY created_at DESC
     `,
-    [siteId]
+    [siteId],
   );
   return res.rows;
 }
@@ -74,7 +74,7 @@ export function findMatchingIgnoreRule(
   siteId: string | null,
   linkUrl: string,
   statusCode: number | null,
-  rules: IgnoreRule[]
+  rules: IgnoreRule[],
 ): IgnoreRule | null {
   let host = "";
   let path = "";
@@ -130,7 +130,8 @@ export function findMatchingIgnoreRule(
       if (path.startsWith(pattern)) return rule;
     }
     if (rule.rule_type === "exact" && linkUrl === rule.pattern) return rule;
-    if (rule.rule_type === "contains" && linkUrl.includes(rule.pattern)) return rule;
+    if (rule.rule_type === "contains" && linkUrl.includes(rule.pattern))
+      return rule;
     if (rule.rule_type === "regex") {
       try {
         const regex = new RegExp(rule.pattern);
@@ -148,7 +149,7 @@ export function findMatchingIgnoreRule(
 export async function createIgnoreRule(
   siteId: string | null,
   ruleType: IgnoreRuleType,
-  pattern: string
+  pattern: string,
 ): Promise<IgnoreRule> {
   const client = await ensureConnected();
   const res = await client.query<IgnoreRule>(
@@ -157,7 +158,7 @@ export async function createIgnoreRule(
       VALUES ($1, $2, $3)
       RETURNING id, site_id, rule_type, pattern, is_enabled, created_at
     `,
-    [siteId, ruleType, pattern]
+    [siteId, ruleType, pattern],
   );
   return res.rows[0];
 }
@@ -169,7 +170,7 @@ export async function deleteIgnoreRule(ruleId: string): Promise<void> {
 
 export async function setIgnoreRuleEnabled(
   ruleId: string,
-  enabled: boolean
+  enabled: boolean,
 ): Promise<IgnoreRule | null> {
   const client = await ensureConnected();
   const res = await client.query<IgnoreRule>(
@@ -179,14 +180,14 @@ export async function setIgnoreRuleEnabled(
       WHERE id = $1
       RETURNING id, site_id, rule_type, pattern, is_enabled, created_at
     `,
-    [ruleId, enabled]
+    [ruleId, enabled],
   );
   return res.rows[0] ?? null;
 }
 
 export function matchesIgnoreRules(
   input: { url: string; statusCode: number | null; classification: string },
-  rules: IgnoreRule[]
+  rules: IgnoreRule[],
 ): boolean {
   for (const rule of rules) {
     if (!rule.is_enabled) continue;
@@ -208,7 +209,10 @@ export function matchesIgnoreRules(
       const code = Number(rule.pattern);
       if (!Number.isNaN(code) && input.statusCode === code) return true;
     }
-    if (rule.rule_type === "classification" && input.classification === rule.pattern) {
+    if (
+      rule.rule_type === "classification" &&
+      input.classification === rule.pattern
+    ) {
       return true;
     }
   }

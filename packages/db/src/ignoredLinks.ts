@@ -49,7 +49,13 @@ export async function upsertIgnoredLink(args: {
         last_seen_at = NOW()
       RETURNING *
     `,
-    [args.scanRunId, args.linkUrl, args.ruleId, args.statusCode, args.errorMessage ?? null]
+    [
+      args.scanRunId,
+      args.linkUrl,
+      args.ruleId,
+      args.statusCode,
+      args.errorMessage ?? null,
+    ],
   );
   return res.rows[0];
 }
@@ -72,16 +78,20 @@ export async function insertIgnoredOccurrence(args: {
       VALUES ($1, $2, $3, $4)
       RETURNING *
     `,
-    [args.scanIgnoredLinkId, args.scanRunId, args.linkUrl, args.sourcePage]
+    [args.scanIgnoredLinkId, args.scanRunId, args.linkUrl, args.sourcePage],
   );
   return res.rows[0];
 }
 
-export async function listIgnoredLinksForRun(scanRunId: string, limit: number, offset: number) {
+export async function listIgnoredLinksForRun(
+  scanRunId: string,
+  limit: number,
+  offset: number,
+) {
   const client = await ensureConnected();
   const countRes = await client.query<{ count: string }>(
     `SELECT COUNT(*) as count FROM scan_ignored_links WHERE scan_run_id = $1`,
-    [scanRunId]
+    [scanRunId],
   );
   const totalMatching = Number(countRes.rows[0]?.count ?? 0);
 
@@ -97,7 +107,7 @@ export async function listIgnoredLinksForRun(scanRunId: string, limit: number, o
       ORDER BY sil.last_seen_at DESC
       LIMIT $2 OFFSET $3
     `,
-    [scanRunId, limit, offset]
+    [scanRunId, limit, offset],
   );
 
   return {
@@ -110,12 +120,12 @@ export async function listIgnoredLinksForRun(scanRunId: string, limit: number, o
 export async function listIgnoredOccurrences(
   ignoredLinkId: string,
   limit: number,
-  offset: number
+  offset: number,
 ) {
   const client = await ensureConnected();
   const countRes = await client.query<{ count: string }>(
     `SELECT COUNT(*) as count FROM scan_ignored_occurrences WHERE scan_ignored_link_id = $1`,
-    [ignoredLinkId]
+    [ignoredLinkId],
   );
   const totalMatching = Number(countRes.rows[0]?.count ?? 0);
 
@@ -127,7 +137,7 @@ export async function listIgnoredOccurrences(
       ORDER BY created_at DESC
       LIMIT $2 OFFSET $3
     `,
-    [ignoredLinkId, limit, offset]
+    [ignoredLinkId, limit, offset],
   );
 
   return {

@@ -30,13 +30,16 @@ type ScanRunProgressFields = {
 
 export async function updateScanRunProgress(
   scanRunId: string,
-  fields: ScanRunProgressFields
+  fields: ScanRunProgressFields,
 ): Promise<void> {
   const db = await ensureConnected();
 
-  const totalLinks = typeof fields.totalLinks === "number" ? fields.totalLinks : null;
-  const checkedLinks = typeof fields.checkedLinks === "number" ? fields.checkedLinks : null;
-  const brokenLinks = typeof fields.brokenLinks === "number" ? fields.brokenLinks : null;
+  const totalLinks =
+    typeof fields.totalLinks === "number" ? fields.totalLinks : null;
+  const checkedLinks =
+    typeof fields.checkedLinks === "number" ? fields.checkedLinks : null;
+  const brokenLinks =
+    typeof fields.brokenLinks === "number" ? fields.brokenLinks : null;
 
   await db.query(
     `
@@ -48,11 +51,14 @@ export async function updateScanRunProgress(
       updated_at = NOW()
     WHERE id = $1
     `,
-    [scanRunId, totalLinks, checkedLinks, brokenLinks]
+    [scanRunId, totalLinks, checkedLinks, brokenLinks],
   );
 }
 
-export async function createScanRun(siteId: string, startUrl: string): Promise<string> {
+export async function createScanRun(
+  siteId: string,
+  startUrl: string,
+): Promise<string> {
   const client = await ensureConnected();
   const res = await client.query(
     `
@@ -60,7 +66,7 @@ export async function createScanRun(siteId: string, startUrl: string): Promise<s
     VALUES ($1, $2, 'in_progress')
     RETURNING id
     `,
-    [siteId, startUrl]
+    [siteId, startUrl],
   );
   return res.rows[0].id;
 }
@@ -68,7 +74,7 @@ export async function createScanRun(siteId: string, startUrl: string): Promise<s
 export async function completeScanRun(
   scanRunId: string,
   status: Exclude<ScanStatus, "in_progress">,
-  summary: ScanRunSummary
+  summary: ScanRunSummary,
 ): Promise<void> {
   const client = await ensureConnected();
   const { totalLinks, checkedLinks, brokenLinks } = summary;
@@ -84,7 +90,7 @@ export async function completeScanRun(
         broken_links = $5
     WHERE id = $1
     `,
-    [scanRunId, status, totalLinks, checkedLinks, brokenLinks]
+    [scanRunId, status, totalLinks, checkedLinks, brokenLinks],
   );
 }
 
@@ -98,30 +104,31 @@ export async function cancelScanRun(scanRunId: string): Promise<void> {
           updated_at = NOW()
       WHERE id = $1 AND status = 'in_progress'
     `,
-    [scanRunId]
+    [scanRunId],
   );
 }
 
 export async function getScanRunStatus(
-  scanRunId: string
+  scanRunId: string,
 ): Promise<{ status: ScanStatus } | null> {
   const client = await ensureConnected();
   const res = await client.query<{ status: ScanStatus }>(
     `SELECT status FROM scan_runs WHERE id = $1`,
-    [scanRunId]
+    [scanRunId],
   );
   return res.rows[0] ?? null;
 }
 
 export async function touchScanRun(scanRunId: string): Promise<void> {
   const client = await ensureConnected();
-  await client.query(
-    `UPDATE scan_runs SET updated_at = NOW() WHERE id = $1`,
-    [scanRunId]
-  );
+  await client.query(`UPDATE scan_runs SET updated_at = NOW() WHERE id = $1`, [
+    scanRunId,
+  ]);
 }
 
-export async function getLatestScanForSite(siteId: string): Promise<ScanRunRow | null> {
+export async function getLatestScanForSite(
+  siteId: string,
+): Promise<ScanRunRow | null> {
   const client = await ensureConnected();
   const res = await client.query(
     `
@@ -141,7 +148,7 @@ export async function getLatestScanForSite(siteId: string): Promise<ScanRunRow |
     ORDER BY started_at DESC
     LIMIT 1
     `,
-    [siteId]
+    [siteId],
   );
   return res.rows[0] ?? null;
 }

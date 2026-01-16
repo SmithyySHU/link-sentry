@@ -27,7 +27,10 @@ export {
   getDiffBetweenRuns,
   getRecentScanRunsForSite,
 } from "./scanRunsHistory.js";
-export type { ScanLinkMinimalRow, ScanRunHistoryRow } from "./scanRunsHistory.js";
+export type {
+  ScanLinkMinimalRow,
+  ScanRunHistoryRow,
+} from "./scanRunsHistory.js";
 
 export {
   getResultsForScanRun,

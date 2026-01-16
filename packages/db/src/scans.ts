@@ -16,7 +16,7 @@ export interface ScanRunRow {
 }
 
 export async function getLatestScanForSite(
-  siteId: string
+  siteId: string,
 ): Promise<ScanRunRow | null> {
   const client = await ensureConnected();
 
@@ -38,7 +38,7 @@ export async function getLatestScanForSite(
       ORDER BY started_at DESC
       LIMIT 1
     `,
-    [siteId]
+    [siteId],
   );
 
   if (res.rowCount === 0) {
@@ -50,7 +50,7 @@ export async function getLatestScanForSite(
 
 export async function getRecentScansForSite(
   siteId: string,
-  limit: number
+  limit: number,
 ): Promise<ScanRunRow[]> {
   const client = await ensureConnected();
 
@@ -72,14 +72,14 @@ export async function getRecentScansForSite(
       ORDER BY started_at DESC
       LIMIT $2
     `,
-    [siteId, limit]
+    [siteId, limit],
   );
 
   return res.rows;
 }
 
 export async function getScanRunById(
-  scanRunId: string
+  scanRunId: string,
 ): Promise<ScanRunRow | null> {
   const client = await ensureConnected();
 
@@ -100,7 +100,7 @@ export async function getScanRunById(
       WHERE id = $1
       LIMIT 1
     `,
-    [scanRunId]
+    [scanRunId],
   );
 
   return res.rows[0] ?? null;

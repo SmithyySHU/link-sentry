@@ -3,7 +3,8 @@ import { ensureConnected } from "./client.js";
 import type { IgnoreRule } from "./ignoreRules.js";
 
 const RULE_SORT = (a: IgnoreRule, b: IgnoreRule) => {
-  if (a.rule_type !== b.rule_type) return a.rule_type.localeCompare(b.rule_type);
+  if (a.rule_type !== b.rule_type)
+    return a.rule_type.localeCompare(b.rule_type);
   if (a.pattern !== b.pattern) return a.pattern.localeCompare(b.pattern);
   return a.id.localeCompare(b.id);
 };
@@ -22,14 +23,13 @@ function ignoreReason(rule: IgnoreRule) {
 
 export async function applyIgnoreRulesForScanRun(
   scanRunId: string,
-  opts?: { force?: boolean }
-): Promise<{ applied: boolean; ignoredCount: number; rulesHash: string }>
-{
+  opts?: { force?: boolean },
+): Promise<{ applied: boolean; ignoredCount: number; rulesHash: string }> {
   const client = await ensureConnected();
 
   const lock = await client.query<{ locked: boolean }>(
     `SELECT pg_try_advisory_lock(hashtext($1)) as locked`,
-    [scanRunId]
+    [scanRunId],
   );
   if (!lock.rows[0]?.locked) {
     return { applied: false, ignoredCount: 0, rulesHash: "" };
@@ -38,7 +38,7 @@ export async function applyIgnoreRulesForScanRun(
   try {
     const runRes = await client.query<{ site_id: string }>(
       `SELECT site_id FROM scan_runs WHERE id = $1`,
-      [scanRunId]
+      [scanRunId],
     );
     const siteId = runRes.rows[0]?.site_id;
     if (!siteId) {
@@ -51,7 +51,7 @@ export async function applyIgnoreRulesForScanRun(
         FROM ignore_rules
         WHERE site_id = $1 AND is_enabled = true
       `,
-      [siteId]
+      [siteId],
     );
 
     const rules = rulesRes.rows;
@@ -60,7 +60,7 @@ export async function applyIgnoreRulesForScanRun(
     if (!opts?.force) {
       const stateRes = await client.query<{ rules_hash: string }>(
         `SELECT rules_hash FROM scan_ignore_apply_state WHERE scan_run_id = $1`,
-        [scanRunId]
+        [scanRunId],
       );
       const existingHash = stateRes.rows[0]?.rules_hash;
       if (existingHash && existingHash === rulesHash) {
@@ -78,7 +78,7 @@ export async function applyIgnoreRulesForScanRun(
             ignored_source = 'none'
         WHERE scan_run_id = $1 AND ignored_source = 'rule'
       `,
-      [scanRunId]
+      [scanRunId],
     );
 
     let ignoredCount = 0;
@@ -99,7 +99,7 @@ export async function applyIgnoreRulesForScanRun(
               AND ignored_source != 'manual'
               AND link_url = $4
           `,
-          [scanRunId, rule.id, reason, rule.pattern]
+          [scanRunId, rule.id, reason, rule.pattern],
         );
         ignoredCount += res.rowCount ?? 0;
       }
@@ -116,7 +116,7 @@ export async function applyIgnoreRulesForScanRun(
               AND ignored_source != 'manual'
               AND link_url ILIKE '%' || $4 || '%'
           `,
-          [scanRunId, rule.id, reason, rule.pattern]
+          [scanRunId, rule.id, reason, rule.pattern],
         );
         ignoredCount += res.rowCount ?? 0;
       }
@@ -135,7 +135,7 @@ export async function applyIgnoreRulesForScanRun(
                 AND ignored_source != 'manual'
                 AND status_code = $4
             `,
-            [scanRunId, rule.id, reason, code]
+            [scanRunId, rule.id, reason, code],
           );
           ignoredCount += res.rowCount ?? 0;
         }
@@ -153,7 +153,7 @@ export async function applyIgnoreRulesForScanRun(
               AND ignored_source != 'manual'
               AND classification = $4
           `,
-          [scanRunId, rule.id, reason, rule.pattern]
+          [scanRunId, rule.id, reason, rule.pattern],
         );
         ignoredCount += res.rowCount ?? 0;
       }
@@ -168,7 +168,9 @@ export async function applyIgnoreRulesForScanRun(
           return null;
         }
       })
-      .filter((entry): entry is { rule: IgnoreRule; regex: RegExp } => entry !== null);
+      .filter(
+        (entry): entry is { rule: IgnoreRule; regex: RegExp } => entry !== null,
+      );
 
     if (regexRules.length > 0) {
       const candidates = await client.query<{ id: string; link_url: string }>(
@@ -177,7 +179,7 @@ export async function applyIgnoreRulesForScanRun(
           FROM scan_links
           WHERE scan_run_id = $1 AND ignored_source != 'manual' AND ignored = false
         `,
-        [scanRunId]
+        [scanRunId],
       );
 
       const idsByRule = new Map<string, string[]>();
@@ -207,7 +209,7 @@ export async function applyIgnoreRulesForScanRun(
                 ignore_reason = $3
             WHERE id = ANY($1::uuid[])
           `,
-          [ids, entry.rule.id, ignoreReason(entry.rule)]
+          [ids, entry.rule.id, ignoreReason(entry.rule)],
         );
         ignoredCount += res.rowCount ?? 0;
       }
@@ -220,7 +222,7 @@ export async function applyIgnoreRulesForScanRun(
         ON CONFLICT (scan_run_id)
         DO UPDATE SET last_applied_at = excluded.last_applied_at, rules_hash = excluded.rules_hash
       `,
-      [scanRunId, rulesHash]
+      [scanRunId, rulesHash],
     );
 
     return { applied: true, ignoredCount, rulesHash };
