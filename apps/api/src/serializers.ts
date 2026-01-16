@@ -1,5 +1,4 @@
-import type { ScanRunRow } from "../../../packages/db/src/scans";
-import type { ScanRunHistoryRow } from "../../../packages/db/src/scanRunsHistory.js";
+import type { ScanRunHistoryRow, ScanRunRow } from "@link-sentry/db";
 
 type ScanRunInput = ScanRunRow | ScanRunHistoryRow;
 

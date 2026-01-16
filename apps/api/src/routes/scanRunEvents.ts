@@ -1,5 +1,5 @@
 import { Application, Request, Response } from "express";
-import { getScanRunById } from "../../../../packages/db/src/scans";
+import { getScanRunById } from "@link-sentry/db";
 import { serializeScanRun } from "../serializers";
 
 export function mountScanRunEvents(app: Application) {

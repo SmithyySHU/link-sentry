@@ -3,27 +3,21 @@ import extractLinks from "./extractLinks.js";
 import validateLink from "./validateLink.js";
 import { classifyStatus } from "./classifyStatus.js";
 import { normaliseLink } from "./normaliseLink.js";
+import type { IgnoreRule } from "@link-sentry/db";
 import {
-  createScanRun,
   completeScanRun,
-  updateScanRunProgress,
-  getScanRunStatus,
-  touchScanRun,
-} from "../../db/src/scanRuns";
-import { insertScanResult } from "../../db/src/scanResults.js";
-import {
-  upsertScanLink,
-  insertScanLinkOccurrence,
-} from "../../db/src/scanLinksDedup.js";
-import {
-  listIgnoreRules,
+  createScanRun,
   findMatchingIgnoreRule,
-} from "../../db/src/ignoreRules.js";
-import type { IgnoreRule } from "../../db/src/ignoreRules.js";
-import {
-  upsertIgnoredLink,
+  getScanRunStatus,
   insertIgnoredOccurrence,
-} from "../../db/src/ignoredLinks.js";
+  insertScanLinkOccurrence,
+  insertScanResult,
+  listIgnoreRules,
+  touchScanRun,
+  updateScanRunProgress,
+  upsertIgnoredLink,
+  upsertScanLink,
+} from "@link-sentry/db";
 
 export interface ScanExecutionSummary {
   scanRunId: string;

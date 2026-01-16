@@ -1,59 +1,46 @@
 import express from "express";
 import type { Response } from "express";
 import cors from "cors";
-import type { LinkClassification } from "../../../packages/db/src/scanRuns.js";
-import type { ExportClassification } from "../../../packages/db/src/scanLinksDedup.js";
-import type { ScanLinkOccurrenceRow } from "../../../packages/db/src/scanLinksDedup.js";
-import type { IgnoreRuleType } from "../../../packages/db/src/ignoreRules.js";
-
+import type {
+  ExportClassification,
+  IgnoreRuleType,
+  LinkClassification,
+  ScanLinkOccurrenceRow,
+} from "@link-sentry/db";
 import {
-  getLatestScanForSite,
-  getRecentScansForSite,
-  getScanRunById,
-} from "../../../packages/db/src/scans";
-import { cancelScanRun } from "../../../packages/db/src/scanRuns.js";
-
-import {
-  getSitesForUser,
-  getSiteById,
-  createSite,
-  deleteSite,
-} from "../../../packages/db/src/sites.js";
-
-import {
-  getResultsForScanRun,
-  getResultsSummaryForScanRun,
-} from "../../../packages/db/src/scanResults.js";
-import {
-  getScanLinksForRun,
-  getOccurrencesForScanLink,
-  getScanLinkById,
-  getScanLinkByRunAndUrl,
-  setScanLinkIgnoredForRun,
-  getScanLinksSummary,
-  getScanLinksForExport,
-  getTopLinksByClassification,
-  getTimeoutCountForRun,
-} from "../../../packages/db/src/scanLinksDedup.js";
-import { runScanForSite } from "../../../packages/crawler/src/scanService.js";
-import {
-  listIgnoreRulesForSite,
-  listIgnoreRules,
+  applyIgnoreRulesForScanRun,
+  cancelScanRun,
   createIgnoreRule,
   deleteIgnoreRule,
-  setIgnoreRuleEnabled,
-} from "../../../packages/db/src/ignoreRules.js";
-import { applyIgnoreRulesForScanRun } from "../../../packages/db/src/scanLinksIgnoreApply.js";
-import {
-  getRecentScanRunsForSite,
   getDiffBetweenRuns,
-} from "../../../packages/db/src/scanRunsHistory.js";
-import {
+  getLatestScanForSite,
+  getOccurrencesForScanLink,
+  getRecentScanRunsForSite,
+  getRecentScansForSite,
+  getResultsForScanRun,
+  getResultsSummaryForScanRun,
+  getScanLinkById,
+  getScanLinkByRunAndUrl,
+  getScanLinksForExport,
+  getScanLinksForRun,
+  getScanLinksSummary,
+  getScanRunById,
+  getSiteById,
+  getSitesForUser,
+  getTimeoutCountForRun,
+  getTopLinksByClassification,
+  insertIgnoredOccurrence,
+  listIgnoreRules,
+  listIgnoreRulesForSite,
   listIgnoredLinksForRun,
   listIgnoredOccurrences,
+  setIgnoreRuleEnabled,
+  setScanLinkIgnoredForRun,
   upsertIgnoredLink,
-  insertIgnoredOccurrence,
-} from "../../../packages/db/src/ignoredLinks.js";
+  createSite,
+  deleteSite,
+} from "@link-sentry/db";
+import { runScanForSite } from "../../../packages/crawler/src/scanService.js";
 
 import { mountScanRunEvents } from "./routes/scanRunEvents";
 import { serializeScanRun } from "./serializers";
