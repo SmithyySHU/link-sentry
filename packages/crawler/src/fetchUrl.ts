@@ -3,22 +3,21 @@ import { lookup } from "dns/promises";
 
 const ALLOWED_PROTOCOLS = new Set<string>(["http:", "https:"]);
 const MAX_REDIRECTS = 5;
+const LOG_LIMIT_PER_HOST = 3;
+const loggedErrorsByHost = new Map<string, number>();
 
 function ipv4ToInt(ip: string): number | null {
   const parts = ip.split(".").map((p) => Number(p));
   if (
     parts.length !== 4 ||
     parts.some(
-      (p) => !Number.isInteger(p) || p < 0 || p > 255 || Number.isNaN(p)
+      (p) => !Number.isInteger(p) || p < 0 || p > 255 || Number.isNaN(p),
     )
   ) {
     return null;
   }
   return (
-    ((parts[0] << 24) |
-      (parts[1] << 16) |
-      (parts[2] << 8) |
-      parts[3]) >>> 0
+    ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0
   );
 }
 
@@ -66,11 +65,7 @@ async function ensureSafeDestination(hostname: string): Promise<void> {
   const lower = hostname.toLowerCase();
 
   // Basic hostname bans
-  if (
-    lower === "localhost" ||
-    lower === "127.0.0.1" ||
-    lower === "::1"
-  ) {
+  if (lower === "localhost" || lower === "127.0.0.1" || lower === "::1") {
     throw new Error("Refusing to crawl localhost / loopback address");
   }
 
@@ -80,7 +75,7 @@ async function ensureSafeDestination(hostname: string): Promise<void> {
   for (const addr of addresses) {
     if (isPrivateOrLoopbackIp(addr.address)) {
       throw new Error(
-        `Refusing to crawl internal/private address: ${addr.address}`
+        `Refusing to crawl internal/private address: ${addr.address}`,
       );
     }
   }
@@ -101,7 +96,11 @@ async function validateCrawlTarget(rawUrl: string): Promise<URL> {
   }
 
   // Optional: restrict ports to typical web ports only
-  const port = url.port ? Number(url.port) : (url.protocol === "https:" ? 443 : 80);
+  const port = url.port
+    ? Number(url.port)
+    : url.protocol === "https:"
+      ? 443
+      : 80;
   if (!ALLOWED_PORTS.has(port)) {
     throw new Error(`Disallowed port in crawl URL: ${port}`);
   }
@@ -116,9 +115,23 @@ async function validateCrawlTarget(rawUrl: string): Promise<URL> {
 // - restrict ports to 80/443
 // - resolve DNS and block private/loopback IP ranges
 // - revalidate on redirects and cap redirect depth
+type FetchUrlOptions = {
+  timeoutMs?: number;
+  userAgent?: string;
+  signal?: AbortSignal;
+};
+
+function shouldLogHost(hostname: string | null) {
+  if (!hostname) return false;
+  const count = loggedErrorsByHost.get(hostname) ?? 0;
+  if (count >= LOG_LIMIT_PER_HOST) return false;
+  loggedErrorsByHost.set(hostname, count + 1);
+  return true;
+}
+
 export default async function fetchUrl(
   rawUrl: string,
-  options?: { timeoutMs?: number; userAgent?: string }
+  options?: FetchUrlOptions,
 ): Promise<string | null> {
   const initialUrl = (await validateCrawlTarget(rawUrl)).toString();
 
@@ -127,6 +140,15 @@ export default async function fetchUrl(
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  if (options?.signal) {
+    if (options.signal.aborted) {
+      controller.abort();
+    } else {
+      options.signal.addEventListener("abort", () => controller.abort(), {
+        once: true,
+      });
+    }
+  }
 
   try {
     let currentUrl = initialUrl;
@@ -197,17 +219,21 @@ export default async function fetchUrl(
     }
 
     return await res.text();
-  } catch (err: any) {
-    if (err?.name === "AbortError") {
-      console.error("Timed out fetching URL", {
-        url: rawUrl,
-        timeoutMs,
-      });
-    } else {
-      console.error("Error fetching URL", {
-        url: rawUrl,
-        error: err,
-      });
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err : null;
+    const host = safeHost(rawUrl);
+    if (shouldLogHost(host)) {
+      if (error?.name === "AbortError") {
+        console.warn("Timed out fetching URL", {
+          url: rawUrl,
+          timeoutMs,
+        });
+      } else {
+        console.warn("Error fetching URL", {
+          url: rawUrl,
+          error,
+        });
+      }
     }
     return null;
   } finally {
@@ -215,3 +241,10 @@ export default async function fetchUrl(
   }
 }
 
+function safeHost(url: string): string | null {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}

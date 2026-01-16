@@ -1,6 +1,6 @@
 import { ensureConnected } from "./client.js";
 
-export type ScanStatus = "in_progress" | "completed" | "failed";
+export type ScanStatus = "in_progress" | "completed" | "failed" | "cancelled";
 
 export interface ScanRunRow {
   id: string;
@@ -8,6 +8,7 @@ export interface ScanRunRow {
   status: ScanStatus;
   started_at: Date;
   finished_at: Date | null;
+  updated_at: Date;
   start_url: string;
   total_links: number;
   checked_links: number;
@@ -15,7 +16,7 @@ export interface ScanRunRow {
 }
 
 export async function getLatestScanForSite(
-  siteId: string
+  siteId: string,
 ): Promise<ScanRunRow | null> {
   const client = await ensureConnected();
 
@@ -27,6 +28,7 @@ export async function getLatestScanForSite(
         status,
         started_at,
         finished_at,
+        updated_at,
         start_url,
         total_links,
         checked_links,
@@ -36,7 +38,7 @@ export async function getLatestScanForSite(
       ORDER BY started_at DESC
       LIMIT 1
     `,
-    [siteId]
+    [siteId],
   );
 
   if (res.rowCount === 0) {
@@ -48,7 +50,7 @@ export async function getLatestScanForSite(
 
 export async function getRecentScansForSite(
   siteId: string,
-  limit: number
+  limit: number,
 ): Promise<ScanRunRow[]> {
   const client = await ensureConnected();
 
@@ -60,6 +62,7 @@ export async function getRecentScansForSite(
         status,
         started_at,
         finished_at,
+        updated_at,
         start_url,
         total_links,
         checked_links,
@@ -69,8 +72,36 @@ export async function getRecentScansForSite(
       ORDER BY started_at DESC
       LIMIT $2
     `,
-    [siteId, limit]
+    [siteId, limit],
   );
 
   return res.rows;
+}
+
+export async function getScanRunById(
+  scanRunId: string,
+): Promise<ScanRunRow | null> {
+  const client = await ensureConnected();
+
+  const res = await client.query<ScanRunRow>(
+    `
+      SELECT
+        id,
+        site_id,
+        status,
+        started_at,
+        finished_at,
+        updated_at,
+        start_url,
+        total_links,
+        checked_links,
+        broken_links
+      FROM scan_runs
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [scanRunId],
+  );
+
+  return res.rows[0] ?? null;
 }

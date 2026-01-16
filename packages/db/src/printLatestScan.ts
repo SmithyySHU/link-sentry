@@ -28,7 +28,7 @@ async function main(): Promise<void> {
       ORDER BY started_at DESC
       LIMIT 1
     `,
-    [siteId]
+    [siteId],
   );
 
   if (res.rowCount === 0) {
@@ -40,9 +40,7 @@ async function main(): Promise<void> {
   const run = res.rows[0];
   const healthy = run.checked_links - run.broken_links;
   const brokenPct =
-    run.checked_links > 0
-      ? (run.broken_links / run.checked_links) * 100
-      : 0;
+    run.checked_links > 0 ? (run.broken_links / run.checked_links) * 100 : 0;
 
   console.log(`Latest scan for site ${siteId}:`);
   console.log("--------------------------------------------------");
@@ -51,12 +49,12 @@ async function main(): Promise<void> {
   console.log(`url:      ${run.start_url}`);
   console.log(`started:  ${run.started_at.toISOString()}`);
   console.log(
-    `finished: ${run.finished_at ? run.finished_at.toISOString() : "in-progress"}`
+    `finished: ${run.finished_at ? run.finished_at.toISOString() : "in-progress"}`,
   );
   console.log(
     `links:    total=${run.total_links}, checked=${run.checked_links}, broken=${run.broken_links}, healthy=${healthy} (${brokenPct.toFixed(
-      1
-    )}% broken)`
+      1,
+    )}% broken)`,
   );
 
   await closeConnection();

@@ -11,7 +11,7 @@ node_modules/
 dist/
 .next/
 out/
-db/
+/db/
 
 # Logs
 *.log

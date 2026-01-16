@@ -1,8 +1,20 @@
 export type NormalisedLink =
   | { kind: "http"; url: string }
-  | { kind: "skip"; reason: "empty" | "fragment" | "mailto" | "tel" | "javascript" | "unsupported" };
+  | {
+      kind: "skip";
+      reason:
+        | "empty"
+        | "fragment"
+        | "mailto"
+        | "tel"
+        | "javascript"
+        | "unsupported";
+    };
 
-export function normaliseLink(rawHref: string, baseUrl: string): NormalisedLink {
+export function normaliseLink(
+  rawHref: string,
+  baseUrl: string,
+): NormalisedLink {
   const href = rawHref.trim();
 
   if (!href) return { kind: "skip", reason: "empty" };
