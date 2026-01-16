@@ -33,6 +33,8 @@ npm run dev:db
 npm run scan:once -- <siteId> <startUrl>
 ```
 
+Note: `npm --workspaces run build` may print a Vite CJS deprecation warning; the build still completes successfully.
+
 ## Migrations
 
 The DB package ships SQL migrations in `packages/db/migrations/`.

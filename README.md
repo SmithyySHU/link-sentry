@@ -114,6 +114,8 @@ GitHub Actions runs on pushes + PRs:
 - typecheck / lint / build across workspaces
 - formatting check (Prettier) to fail PRs with unformatted code
 
+Note: `npm --workspaces run build` may print a Vite CJS deprecation warning; the build still completes successfully.
+
 ---
 
 ## Roadmap (near-term)

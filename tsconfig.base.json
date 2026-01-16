@@ -1,0 +1,10 @@
+{
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@link-sentry/db": ["packages/db/src/index.ts"],
+      "@link-sentry/crawler": ["packages/crawler/src/index.ts"],
+      "@link-sentry/*": ["packages/*/src"]
+    }
+  }
+}

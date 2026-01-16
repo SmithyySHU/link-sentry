@@ -18,19 +18,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Detect Node version
-        run: |
-          if [ -f .nvmrc ]; then
-            NODE_VERSION="$(cat .nvmrc | tr -d ' \t\n\r')"
-          else
-            NODE_VERSION=20
-          fi
-          echo "NODE_VERSION=$NODE_VERSION" >> "$GITHUB_ENV"
-
-      - name: Setup Node
+      - name: Setup Node (from .nvmrc)
+        if: ${{ hashFiles('.nvmrc') != '' }}
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Setup Node (default)
+        if: ${{ hashFiles('.nvmrc') == '' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
           cache: npm
 
       - name: Node version
@@ -52,13 +51,13 @@ jobs:
         run: npm run format:check
 
       - name: Workspace typecheck
-        run: npm -ws run typecheck
+        run: npm --workspaces run typecheck --if-present
 
       - name: Workspace lint
-        run: npm -ws run lint --if-present
+        run: npm --workspaces run lint --if-present
 
       - name: Workspace build
-        run: npm -ws run build --if-present
+        run: npm --workspaces run build --if-present
 
       - name: Root typecheck
         run: npm run typecheck --if-present
