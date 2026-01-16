@@ -1,4 +1,4 @@
-````md
+
 # Link-Sentry
 
 Automated broken-link monitoring for websites.
@@ -60,8 +60,8 @@ Link-Sentry aims to make link monitoring a background task that runs automatical
 ---
 
 ## Project structure
-
-```txt
+```
+txt
 apps/
   api/        # REST API + event endpoints
   web/        # Dashboard UI
@@ -69,7 +69,7 @@ packages/
   crawler/    # crawling + validation + classification
   db/         # SQL migrations + query layer
 ```
-````
+
 
 ---
 
