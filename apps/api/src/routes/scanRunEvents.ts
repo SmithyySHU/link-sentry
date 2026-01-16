@@ -1,5 +1,20 @@
 import { Application, Request, Response } from "express";
+import type { ScanRunRow } from "../../../../packages/db/src/scans";
 import { getScanRunById } from "../../../../packages/db/src/scans";
+
+function serializeScanRun(run: ScanRunRow) {
+  return {
+    id: run.id,
+    site_id: run.site_id,
+    status: run.status,
+    started_at: run.started_at instanceof Date ? run.started_at.toISOString() : run.started_at,
+    finished_at: run.finished_at instanceof Date ? run.finished_at.toISOString() : run.finished_at,
+    start_url: run.start_url,
+    total_links: run.total_links,
+    checked_links: run.checked_links,
+    broken_links: run.broken_links,
+  };
+}
 
 export function mountScanRunEvents(app: Application) {
   app.get("/scan-runs/:scanRunId/events", async (req: Request, res: Response) => {
@@ -35,10 +50,13 @@ export function mountScanRunEvents(app: Application) {
         return;
       }
 
-      const json = JSON.stringify(run);
+      // Serialize to ensure Date objects are converted to ISO strings
+      const serialized = serializeScanRun(run);
+
+      const json = JSON.stringify(serialized);
       if (json !== lastJson) {
         lastJson = json;
-        send("run", run);
+        send("run", serialized);
       }
 
       if (run.status !== "in_progress") {

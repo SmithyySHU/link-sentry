@@ -17,6 +17,18 @@ export interface ScanExecutionSummary {
   brokenLinks: number;
 }
 
+/**
+ * Create a scan run in the database and return the ID.
+ * This allows the API to return immediately with a scanRunId,
+ * then run the scan asynchronously in the background.
+ */
+export async function getScanRunIdOnly(
+  siteId: string,
+  startUrl: string
+): Promise<string> {
+  return await createScanRun(siteId, startUrl);
+}
+
 function createLimiter(concurrency: number) {
   let active = 0;
   const queue: Array<() => void> = [];
@@ -75,9 +87,11 @@ type ValidationResult = {
 
 export async function runScanForSite(
   siteId: string,
-  startUrl: string
+  startUrl: string,
+  scanRunId?: string
 ): Promise<ScanExecutionSummary> {
-  const scanRunId = await createScanRun(siteId, startUrl);
+  // If scanRunId is not provided, create a new one
+  const actualScanRunId = scanRunId ?? (await createScanRun(siteId, startUrl));
 
   const MAX_PAGES = 25;
   const MAX_DEPTH = 2;
@@ -118,7 +132,7 @@ export async function runScanForSite(
       lastBroken = brokenUnique;
 
       try {
-        await updateScanRunProgress(scanRunId, {
+        await updateScanRunProgress(actualScanRunId, {
           totalLinks,
           checkedLinks: checkedUnique,
           brokenLinks: brokenUnique,
@@ -133,7 +147,7 @@ export async function runScanForSite(
       progressTimer = null;
     }
     try {
-      await updateScanRunProgress(scanRunId, {
+      await updateScanRunProgress(actualScanRunId, {
         totalLinks,
         checkedLinks: checkedUnique,
         brokenLinks: brokenUnique,
@@ -261,14 +275,16 @@ export async function runScanForSite(
     await Promise.allSettled(Array.from(validationMap.values()));
     await flushProgressWrite(discoveredLinks.size);
 
-    await completeScanRun(scanRunId, "completed", {
+    console.log(`[scan] Completing scan ${actualScanRunId} with status completed`);
+    await completeScanRun(actualScanRunId, "completed", {
       totalLinks: discoveredLinks.size,
       checkedLinks: checkedUnique,
       brokenLinks: brokenUnique,
     });
+    console.log(`[scan] Scan ${actualScanRunId} completed successfully`);
 
     return {
-      scanRunId,
+      scanRunId: actualScanRunId,
       totalLinks: discoveredLinks.size,
       checkedLinks: checkedUnique,
       brokenLinks: brokenUnique,
@@ -278,14 +294,15 @@ export async function runScanForSite(
 
     await flushProgressWrite(discoveredLinks.size);
 
-    await completeScanRun(scanRunId, "failed", {
+    console.log(`[scan] Completing scan ${actualScanRunId} with status failed`);
+    await completeScanRun(actualScanRunId, "failed", {
       totalLinks: discoveredLinks.size,
       checkedLinks: checkedUnique,
       brokenLinks: brokenUnique,
     });
 
     return {
-      scanRunId,
+      scanRunId: actualScanRunId,
       totalLinks: discoveredLinks.size,
       checkedLinks: checkedUnique,
       brokenLinks: brokenUnique,

@@ -1,5 +1,7 @@
 import { ensureConnected } from "./client.js";
 
+console.log("[db] scanRuns loaded from:", import.meta.url);
+
 export type ScanStatus = "in_progress" | "completed" | "failed";
 export type LinkClassification = "ok" | "broken" | "blocked";
 
@@ -20,18 +22,24 @@ export interface ScanRunRow {
   checked_links: number;
   broken_links: number;
 }
+
 type ScanRunProgressFields = {
   totalLinks?: number;
   checkedLinks?: number;
   brokenLinks?: number;
 };
 
-export async function updateScanRunProgress(scanRunId: string, fields: ScanRunProgressFields) {
+export async function updateScanRunProgress(
+  scanRunId: string,
+  fields: ScanRunProgressFields
+) {
   const db = await ensureConnected();
 
   const totalLinks = typeof fields.totalLinks === "number" ? fields.totalLinks : null;
   const checkedLinks = typeof fields.checkedLinks === "number" ? fields.checkedLinks : null;
   const brokenLinks = typeof fields.brokenLinks === "number" ? fields.brokenLinks : null;
+
+  console.log("[db] updateScanRunProgress", scanRunId, fields);
 
   await db.query(
     `
@@ -59,9 +67,16 @@ export async function createScanRun(siteId: string, startUrl: string) {
   return res.rows[0].id;
 }
 
-export async function completeScanRun(scanRunId: string, status: Exclude<ScanStatus, "in_progress">, summary: ScanRunSummary) {
+export async function completeScanRun(
+  scanRunId: string,
+  status: Exclude<ScanStatus, "in_progress">,
+  summary: ScanRunSummary
+) {
   const client = await ensureConnected();
   const { totalLinks, checkedLinks, brokenLinks } = summary;
+
+  console.log("[db] completeScanRun", scanRunId, "status:", status, "summary:", summary);
+
   await client.query(
     `
     UPDATE scan_runs
@@ -74,6 +89,8 @@ export async function completeScanRun(scanRunId: string, status: Exclude<ScanSta
     `,
     [scanRunId, status, totalLinks, checkedLinks, brokenLinks]
   );
+
+  console.log("[db] completeScanRun completed for", scanRunId);
 }
 
 export async function getLatestScanForSite(siteId: string) {

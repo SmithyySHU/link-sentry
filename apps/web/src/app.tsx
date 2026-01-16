@@ -85,9 +85,11 @@ const App: React.FC = () => {
   const scansRef = useRef<HTMLDivElement | null>(null);
 
   const pollHistoryRef = useRef<number | null>(null);
+  const pollRunRef = useRef<number | null>(null);
 
   const selectedSiteIdRef = useRef<string | null>(null);
   const selectedRunIdRef = useRef<string | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
 
   const [sites, setSites] = useState<Site[]>([]);
   const [sitesLoading, setSitesLoading] = useState(false);
@@ -115,11 +117,8 @@ const App: React.FC = () => {
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
-  const activeRunIdRef = useRef<string | null>(null);
 
   const hasSites = sites.length > 0;
-
-  const sseRef = useRef<{ runId: string; es: EventSource } | null>(null);
 
   useEffect(() => {
     selectedSiteIdRef.current = selectedSiteId;
@@ -131,6 +130,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     activeRunIdRef.current = activeRunId;
+    console.log("[frontend] activeRunId updated:", activeRunId);
   }, [activeRunId]);
 
   const pinnedRunId = activeRunId ?? selectedRunId;
@@ -150,87 +150,41 @@ const App: React.FC = () => {
 
   const isSelectedRunInProgress = isInProgress(selectedRun?.status);
 
-  function stopRunStream() {
-    if (sseRef.current) {
-      try {
-        sseRef.current.es.close();
-      } catch {}
-      sseRef.current = null;
-    }
-  }
-
-  function startRunStream(runId: string) {
-    if (!runId) return;
-
-    if (sseRef.current?.runId === runId) return;
-
-    stopRunStream();
-
-    const es = new EventSource(
-      `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/events`
-    );
-
-    sseRef.current = { runId, es };
-
-    es.addEventListener("run", (evt: MessageEvent) => {
-      try {
-        const run: ScanRunSummary = JSON.parse(evt.data);
-
-        setHistory((prev) => {
-          const idx = prev.findIndex((r) => r.id === run.id);
-          if (idx === -1) return [run, ...prev];
-          const copy = [...prev];
-          copy[idx] = run;
-          return copy;
-        });
-
-        setSelectedRunId(run.id);
-
-        if (!isInProgress(run.status)) {
-          stopRunStream();
-          setActiveRunId(null);
-          void loadHistory(run.site_id, { preserveSelection: true });
-          void loadResults(run.id);
-        }
-      } catch {}
-    });
-
-    es.addEventListener("done", () => {
-      stopRunStream();
-    });
-
-    es.onerror = () => {
-      // EventSource auto-reconnects; no action needed here
-    };
-  }
-
   function stopPolling() {
     if (pollHistoryRef.current) {
       window.clearInterval(pollHistoryRef.current);
       pollHistoryRef.current = null;
     }
-    stopRunStream();
+    if (pollRunRef.current) {
+      window.clearInterval(pollRunRef.current);
+      pollRunRef.current = null;
+    }
   }
 
-  function startPolling(runIdOverride?: string) {
+  function startPolling() {
+    console.log("[frontend] Starting polling, activeRunId:", activeRunIdRef.current, "selectedRunId:", selectedRunIdRef.current);
     stopPolling();
 
     pollHistoryRef.current = window.setInterval(() => {
       const siteId = selectedSiteIdRef.current;
       if (!siteId) return;
-
       if (activeRunIdRef.current) return;
-
       void loadHistory(siteId, { preserveSelection: true });
     }, POLL_MS);
 
-    const runId = runIdOverride ?? activeRunIdRef.current ?? selectedRunIdRef.current;
-    if (runId) startRunStream(runId);
+    pollRunRef.current = window.setInterval(() => {
+      const runId = activeRunIdRef.current ?? selectedRunIdRef.current;
+      if (!runId) {
+        console.log("[frontend] No runId to poll");
+        return;
+      }
+      console.log("[frontend] Polling run", runId);
+      void refreshSelectedRun(runId);
+    }, POLL_MS);
   }
 
   useEffect(() => {
     void loadSites();
-    return stopPolling;
   }, []);
 
   async function loadSites() {
@@ -246,19 +200,33 @@ const App: React.FC = () => {
       if (data.sites.length > 0) {
         const first = data.sites[0];
         setSelectedSiteId(first.id);
+        selectedSiteIdRef.current = first.id;
+
         setStartUrl(first.url);
+
         setActiveRunId(null);
+        activeRunIdRef.current = null;
+
         setSelectedRunId(null);
+        selectedRunIdRef.current = null;
+
         setResults([]);
         setHistory([]);
+
         await loadHistory(first.id, { preserveSelection: false });
       } else {
         setSelectedSiteId(null);
+        selectedSiteIdRef.current = null;
+
         setHistory([]);
         setSelectedRunId(null);
+        selectedRunIdRef.current = null;
+
         setResults([]);
         setStartUrl("");
+
         setActiveRunId(null);
+        activeRunIdRef.current = null;
       }
     } catch (err: any) {
       setSitesError(err?.message ?? "Failed to load sites");
@@ -295,7 +263,10 @@ const App: React.FC = () => {
       setHistory(scans);
 
       if (scans.length === 0) {
-        if (!preserveSelection) setSelectedRunId(null);
+        if (!preserveSelection) {
+          setSelectedRunId(null);
+          selectedRunIdRef.current = null;
+        }
         setResults([]);
         return;
       }
@@ -314,6 +285,7 @@ const App: React.FC = () => {
 
       if (nextSelectedId !== selectedRunIdRef.current) {
         setSelectedRunId(nextSelectedId);
+        selectedRunIdRef.current = nextSelectedId;
       }
 
       const run = scans.find((r) => r.id === nextSelectedId) ?? scans[0];
@@ -324,8 +296,6 @@ const App: React.FC = () => {
 
       if (!isInProgress(run.status)) {
         await loadResults(nextSelectedId);
-      } else {
-        startRunStream(nextSelectedId);
       }
     } catch (err: any) {
       setHistoryError(err?.message ?? "Failed to load history");
@@ -346,7 +316,9 @@ const App: React.FC = () => {
 
       const data: ScanResultsResponse = await res.json();
       setResults(data.results);
+
       setSelectedRunId(runId);
+      selectedRunIdRef.current = runId;
     } catch (err: any) {
       setResultsError(err?.message ?? "Failed to load scan results");
     } finally {
@@ -360,9 +332,9 @@ const App: React.FC = () => {
       return;
     }
 
-    const shouldLive = !!activeRunId || isSelectedRunInProgress;
+    const shouldPoll = !!activeRunId || isSelectedRunInProgress;
 
-    if (shouldLive) startPolling(selectedRun?.id ?? undefined);
+    if (shouldPoll) startPolling();
     else stopPolling();
 
     return () => stopPolling();
@@ -373,43 +345,65 @@ const App: React.FC = () => {
       const res = await fetch(`${API_BASE}/scan-runs/${encodeURIComponent(runId)}`, {
         cache: "no-store",
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        console.error("[frontend] refreshSelectedRun API error:", res.status);
+        return;
+      }
 
       const run: ScanRunSummary = await res.json();
+
+      console.log("[frontend] refreshSelectedRun response:", run);
+      console.log("[frontend] run.status:", run.status, "isInProgress:", isInProgress(run.status));
 
       setHistory((prev) => {
         const idx = prev.findIndex((r) => r.id === run.id);
         if (idx === -1) {
+          console.log("[frontend] Adding new run to history");
           return [run, ...prev];
         }
+        console.log("[frontend] Updating run in history at index", idx);
         const copy = [...prev];
         copy[idx] = run;
         return copy;
       });
 
-      setSelectedRunId(run.id);
+      if (selectedRunIdRef.current !== run.id) {
+        console.log("[frontend] Updating selectedRunId");
+        setSelectedRunId(run.id);
+        selectedRunIdRef.current = run.id;
+      }
 
-      if (isInProgress(run.status)) {
-        startRunStream(run.id);
-      } else {
+      if (!isInProgress(run.status)) {
+        console.log("[frontend] Scan completed, stopping polling");
         setActiveRunId(null);
+        activeRunIdRef.current = null;
+
         stopPolling();
         await loadHistory(run.site_id, { preserveSelection: true });
         await loadResults(run.id);
       }
-    } catch {}
+    } catch (e) {
+      console.error("[frontend] refreshSelectedRun error:", e);
+    }
   }
 
   async function handleSelectSite(site: Site) {
     if (site.id === selectedSiteId) return;
 
     stopPolling();
+
     setActiveRunId(null);
+    activeRunIdRef.current = null;
+
     setHistory([]);
     setResults([]);
+
     setSelectedRunId(null);
+    selectedRunIdRef.current = null;
 
     setSelectedSiteId(site.id);
+    selectedSiteIdRef.current = site.id;
+
     setStartUrl(site.url);
 
     await loadHistory(site.id, { preserveSelection: false });
@@ -459,12 +453,18 @@ const App: React.FC = () => {
         });
 
         setResults([]);
-        setSelectedRunId(scanRunId);
-        setActiveRunId(scanRunId);
 
-        startRunStream(scanRunId);
+        setSelectedRunId(scanRunId);
+        selectedRunIdRef.current = scanRunId;
+
+        setActiveRunId(scanRunId);
+        activeRunIdRef.current = scanRunId;
+
+        console.log("[frontend] About to call startPolling");
+        startPolling();
+        console.log("[frontend] About to call refreshSelectedRun immediately");
         void refreshSelectedRun(scanRunId);
-        startPolling(scanRunId);
+        console.log("[frontend] refreshSelectedRun called");
       } else {
         await loadHistory(selectedSiteId, { preserveSelection: false });
       }
@@ -533,12 +533,20 @@ const App: React.FC = () => {
 
       if (selectedSiteId === siteId) {
         stopPolling();
+
         setSelectedSiteId(null);
+        selectedSiteIdRef.current = null;
+
         setHistory([]);
         setResults([]);
+
         setSelectedRunId(null);
+        selectedRunIdRef.current = null;
+
         setStartUrl("");
+
         setActiveRunId(null);
+        activeRunIdRef.current = null;
       }
 
       await loadSites();
@@ -550,31 +558,9 @@ const App: React.FC = () => {
   }
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        background: "#0f172a",
-        color: "#e5e7eb",
-        padding: "24px",
-      }}
-    >
-      <div
-        style={{
-          maxWidth: "1100px",
-          margin: "0 auto",
-          display: "flex",
-          flexDirection: "column",
-          gap: "24px",
-        }}
-      >
-        <header
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "baseline",
-            gap: "12px",
-          }}
-        >
+    <div style={{ minHeight: "100vh", background: "#0f172a", color: "#e5e7eb", padding: "24px" }}>
+      <div style={{ maxWidth: "1100px", margin: "0 auto", display: "flex", flexDirection: "column", gap: "24px" }}>
+        <header style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: "12px" }}>
           <div>
             <h1 style={{ margin: 0, fontSize: "28px" }}>Link-Sentry</h1>
             <p style={{ margin: 0, color: "#9ca3af" }}>Internal dev dashboard</p>
@@ -593,59 +579,27 @@ const App: React.FC = () => {
                 fontSize: "12px",
               }}
             >
-              Twiddle Scan
+              Link Scan
             </button>
 
-            <span
-              style={{
-                fontSize: "12px",
-                padding: "4px 10px",
-                borderRadius: "999px",
-                background: "#1e293b",
-                color: "#9ca3af",
-              }}
-            >
+            <span style={{ fontSize: "12px", padding: "4px 10px", borderRadius: "999px", background: "#1e293b", color: "#9ca3af" }}>
               api: http://localhost:3001
             </span>
           </div>
         </header>
 
-        <section
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1.2fr 1.8fr 2fr",
-            gap: "16px",
-            alignItems: "flex-start",
-          }}
-        >
-          <div
-            style={{
-              background: "#020617",
-              borderRadius: "16px",
-              padding: "16px",
-              border: "1px solid #1e293b",
-            }}
-          >
+        <section style={{ display: "grid", gridTemplateColumns: "1.2fr 1.8fr 2fr", gap: "16px", alignItems: "flex-start" }}>
+          <div style={{ background: "#020617", borderRadius: "16px", padding: "16px", border: "1px solid #1e293b" }}>
             <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "18px" }}>Sites</h2>
 
             {sitesLoading && <p style={{ fontSize: "14px" }}>Loading sites...</p>}
             {sitesError && <p style={{ color: "#f97316", fontSize: "13px" }}>{sitesError}</p>}
 
             {!sitesLoading && sites.length === 0 && !sitesError && (
-              <p style={{ fontSize: "14px", color: "#9ca3af" }}>
-                No sites yet — add one on the right.
-              </p>
+              <p style={{ fontSize: "14px", color: "#9ca3af" }}>No sites yet — add one on the right.</p>
             )}
 
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: "8px",
-                maxHeight: "260px",
-                overflowY: "auto",
-              }}
-            >
+            <div style={{ display: "flex", flexDirection: "column", gap: "8px", maxHeight: "260px", overflowY: "auto" }}>
               {sites.map((site) => {
                 const isSelected = site.id === selectedSiteId;
                 const isDeleting = deletingSiteId === site.id;
@@ -702,9 +656,7 @@ const App: React.FC = () => {
               })}
             </div>
 
-            {deleteError && (
-              <p style={{ color: "#f97316", fontSize: "13px", marginTop: "10px" }}>{deleteError}</p>
-            )}
+            {deleteError && <p style={{ color: "#f97316", fontSize: "13px", marginTop: "10px" }}>{deleteError}</p>}
           </div>
 
           <div
@@ -756,21 +708,13 @@ const App: React.FC = () => {
                 {creatingSite ? "Adding..." : "Add site"}
               </button>
 
-              {createError && (
-                <p style={{ color: "#f97316", fontSize: "13px", marginTop: "10px" }}>{createError}</p>
-              )}
+              {createError && <p style={{ color: "#f97316", fontSize: "13px", marginTop: "10px" }}>{createError}</p>}
             </div>
 
             <div>
-              <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "18px" }}>
-                Site configuration
-              </h2>
+              <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "18px" }}>Site configuration</h2>
 
-              {!hasSites && (
-                <p style={{ fontSize: "14px", color: "#9ca3af" }}>
-                  Add a site first to run scans.
-                </p>
-              )}
+              {!hasSites && <p style={{ fontSize: "14px", color: "#9ca3af" }}>Add a site first to run scans.</p>}
 
               {hasSites && selectedSiteId && (
                 <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
@@ -814,30 +758,15 @@ const App: React.FC = () => {
             </div>
           </div>
 
-          <div
-            style={{
-              background: "#020617",
-              borderRadius: "16px",
-              padding: "16px",
-              border: "1px solid #1e293b",
-            }}
-          >
+          <div style={{ background: "#020617", borderRadius: "16px", padding: "16px", border: "1px solid #1e293b" }}>
             <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "18px" }}>Selected scan</h2>
 
-            {!hasSites && (
-              <p style={{ fontSize: "14px", color: "#9ca3af" }}>
-                Add a site to view scan history.
-              </p>
-            )}
+            {!hasSites && <p style={{ fontSize: "14px", color: "#9ca3af" }}>Add a site to view scan history.</p>}
 
             {hasSites && historyLoading && <p>Loading history...</p>}
-            {hasSites && historyError && (
-              <p style={{ color: "#f97316", fontSize: "13px" }}>{historyError}</p>
-            )}
+            {hasSites && historyError && <p style={{ color: "#f97316", fontSize: "13px" }}>{historyError}</p>}
             {hasSites && !historyLoading && !selectedRun && !historyError && (
-              <p style={{ fontSize: "14px", color: "#9ca3af" }}>
-                No scans found for this site yet.
-              </p>
+              <p style={{ fontSize: "14px", color: "#9ca3af" }}>No scans found for this site yet.</p>
             )}
 
             {hasSites && selectedRun && (
@@ -852,15 +781,7 @@ const App: React.FC = () => {
                   <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                     <span>{selectedRun.status}</span>
                     {isInProgress(selectedRun.status) && (
-                      <span
-                        style={{
-                          fontSize: "12px",
-                          padding: "2px 8px",
-                          borderRadius: "999px",
-                          background: "#1e293b",
-                          color: "#93c5fd",
-                        }}
-                      >
+                      <span style={{ fontSize: "12px", padding: "2px 8px", borderRadius: "999px", background: "#1e293b", color: "#93c5fd" }}>
                         Running…
                       </span>
                     )}
@@ -880,13 +801,8 @@ const App: React.FC = () => {
                 <div>
                   <span style={{ color: "#9ca3af" }}>Links</span>
                   <div>
-                    total {selectedRun.total_links}, checked {selectedRun.checked_links}, broken{" "}
-                    {selectedRun.broken_links} (
-                    {percentBroken(
-                      selectedRun.checked_links || selectedRun.total_links,
-                      selectedRun.broken_links
-                    )}
-                    )
+                    total {selectedRun.total_links}, checked {selectedRun.checked_links}, broken {selectedRun.broken_links} (
+                    {percentBroken(selectedRun.checked_links || selectedRun.total_links, selectedRun.broken_links)})
                   </div>
 
                   {isInProgress(selectedRun.status) && (
@@ -909,67 +825,21 @@ const App: React.FC = () => {
 
         <div ref={scansRef} />
 
-        <section
-          style={{
-            display: hasSites ? "grid" : "none",
-            gridTemplateColumns: "1.7fr 2.3fr",
-            gap: "16px",
-            alignItems: "flex-start",
-          }}
-        >
-          <div
-            style={{
-              background: "#020617",
-              borderRadius: "16px",
-              padding: "16px",
-              border: "1px solid #1e293b",
-              overflow: "hidden",
-            }}
-          >
+        <section style={{ display: hasSites ? "grid" : "none", gridTemplateColumns: "1.7fr 2.3fr", gap: "16px", alignItems: "flex-start" }}>
+          <div style={{ background: "#020617", borderRadius: "16px", padding: "16px", border: "1px solid #1e293b", overflow: "hidden" }}>
             <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "18px" }}>Recent scans</h2>
 
-            <div
-              style={{
-                maxHeight: "260px",
-                overflowY: "auto",
-                borderRadius: "12px",
-                border: "1px solid #1e293b",
-              }}
-            >
+            <div style={{ maxHeight: "260px", overflowY: "auto", borderRadius: "12px", border: "1px solid #1e293b" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
                 <thead style={{ position: "sticky", top: 0, background: "#020617", zIndex: 1 }}>
                   <tr>
-                    <th
-                      style={{
-                        textAlign: "left",
-                        padding: "6px 8px",
-                        borderBottom: "1px solid #1e293b",
-                        color: "#9ca3af",
-                        fontWeight: 500,
-                      }}
-                    >
+                    <th style={{ textAlign: "left", padding: "6px 8px", borderBottom: "1px solid #1e293b", color: "#9ca3af", fontWeight: 500 }}>
                       Started
                     </th>
-                    <th
-                      style={{
-                        textAlign: "left",
-                        padding: "6px 8px",
-                        borderBottom: "1px solid #1e293b",
-                        color: "#9ca3af",
-                        fontWeight: 500,
-                      }}
-                    >
+                    <th style={{ textAlign: "left", padding: "6px 8px", borderBottom: "1px solid #1e293b", color: "#9ca3af", fontWeight: 500 }}>
                       Status
                     </th>
-                    <th
-                      style={{
-                        textAlign: "right",
-                        padding: "6px 8px",
-                        borderBottom: "1px solid #1e293b",
-                        color: "#9ca3af",
-                        fontWeight: 500,
-                      }}
-                    >
+                    <th style={{ textAlign: "right", padding: "6px 8px", borderBottom: "1px solid #1e293b", color: "#9ca3af", fontWeight: 500 }}>
                       Links
                     </th>
                   </tr>
@@ -983,34 +853,26 @@ const App: React.FC = () => {
                       <tr
                         key={run.id}
                         onClick={() => {
-                          setActiveRunId(null);
+                          setResults([]);
                           setSelectedRunId(run.id);
-                          if (!isInProgress(run.status)) void loadResults(run.id);
-                          else {
+                          selectedRunIdRef.current = run.id;
+
+                          if (isInProgress(run.status)) {
                             setActiveRunId(run.id);
-                            startRunStream(run.id);
-                            startPolling(run.id);
+                            activeRunIdRef.current = run.id;
+                            startPolling();
                             void refreshSelectedRun(run.id);
+                          } else {
+                            setActiveRunId(null);
+                            activeRunIdRef.current = null;
+                            void loadResults(run.id);
                           }
                         }}
-                        style={{
-                          cursor: "pointer",
-                          background: isSelected ? "#0f172a" : "transparent",
-                        }}
+                        style={{ cursor: "pointer", background: isSelected ? "#0f172a" : "transparent" }}
                       >
-                        <td style={{ padding: "6px 8px", borderBottom: "1px solid #0f172a" }}>
-                          {formatDate(run.started_at)}
-                        </td>
-                        <td style={{ padding: "6px 8px", borderBottom: "1px solid #0f172a" }}>
-                          {run.status}
-                        </td>
-                        <td
-                          style={{
-                            padding: "6px 8px",
-                            borderBottom: "1px solid #0f172a",
-                            textAlign: "right",
-                          }}
-                        >
+                        <td style={{ padding: "6px 8px", borderBottom: "1px solid #0f172a" }}>{formatDate(run.started_at)}</td>
+                        <td style={{ padding: "6px 8px", borderBottom: "1px solid #0f172a" }}>{run.status}</td>
+                        <td style={{ padding: "6px 8px", borderBottom: "1px solid #0f172a", textAlign: "right" }}>
                           {run.broken_links} broken ({brokenPct})
                         </td>
                       </tr>
@@ -1029,17 +891,8 @@ const App: React.FC = () => {
             </div>
           </div>
 
-          <div
-            style={{
-              background: "#020617",
-              borderRadius: "16px",
-              padding: "16px",
-              border: "1px solid #1e293b",
-            }}
-          >
-            <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "18px" }}>
-              Broken links in selected scan
-            </h2>
+          <div style={{ background: "#020617", borderRadius: "16px", padding: "16px", border: "1px solid #1e293b" }}>
+            <h2 style={{ marginTop: 0, marginBottom: "12px", fontSize: "18px" }}>Broken links in selected scan</h2>
 
             {resultsLoading && <p>Loading results...</p>}
             {resultsError && <p style={{ color: "#f97316", fontSize: "13px" }}>{resultsError}</p>}
@@ -1049,35 +902,15 @@ const App: React.FC = () => {
               </p>
             )}
 
-            <div
-              style={{
-                maxHeight: "260px",
-                overflowY: "auto",
-                display: "flex",
-                flexDirection: "column",
-                gap: "8px",
-              }}
-            >
+            <div style={{ maxHeight: "260px", overflowY: "auto", display: "flex", flexDirection: "column", gap: "8px" }}>
               {brokenResults.map((row) => (
-                <div
-                  key={row.id}
-                  style={{
-                    padding: "8px 10px",
-                    borderRadius: "10px",
-                    border: "1px solid #7f1d1d",
-                    background: "#111827",
-                  }}
-                >
-                  <div style={{ fontSize: "13px", color: "#fca5a5", marginBottom: "4px" }}>
-                    {row.link_url}
-                  </div>
+                <div key={row.id} style={{ padding: "8px 10px", borderRadius: "10px", border: "1px solid #7f1d1d", background: "#111827" }}>
+                  <div style={{ fontSize: "13px", color: "#fca5a5", marginBottom: "4px" }}>{row.link_url}</div>
                   <div style={{ fontSize: "12px", color: "#9ca3af" }}>
                     status {row.status_code ?? "null"} · {row.classification}
                     {row.error_message ? ` · ${row.error_message}` : ""}
                   </div>
-                  <div style={{ fontSize: "11px", color: "#6b7280", marginTop: "2px" }}>
-                    source: {row.source_page}
-                  </div>
+                  <div style={{ fontSize: "11px", color: "#6b7280", marginTop: "2px" }}>source: {row.source_page}</div>
                 </div>
               ))}
             </div>

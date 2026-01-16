@@ -1,5 +1,8 @@
 import express from "express";
 import cors from "cors";
+import type { ScanRunRow } from "../../../packages/db/src/scans";
+
+
 
 import {
   getLatestScanForSite,
@@ -21,12 +24,27 @@ import { mountScanRunEvents } from "./routes/scanRunEvents";
 
 const DEMO_USER_ID = "00000000-0000-0000-0000-000000000000";
 
-const app = express();
+// Helper to serialize ScanRunRow for JSON response
+function serializeScanRun(run: ScanRunRow) {
+  return {
+    id: run.id,
+    site_id: run.site_id,
+    status: run.status,
+    started_at: run.started_at instanceof Date ? run.started_at.toISOString() : run.started_at,
+    finished_at: run.finished_at instanceof Date ? run.finished_at.toISOString() : run.finished_at,
+    start_url: run.start_url,
+    total_links: run.total_links,
+    checked_links: run.checked_links,
+    broken_links: run.broken_links,
+  };
+}
 
-mountScanRunEvents(app);
+const app = express();
 
 app.use(cors());
 app.use(express.json());
+
+mountScanRunEvents(app);
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "link-sentry-api" });
@@ -68,7 +86,7 @@ app.get("/sites/:siteId/scans", async (req, res) => {
     res.json({
       siteId,
       count: scans.length,
-      scans,
+      scans: scans.map(serializeScanRun),
     });
   } catch (err) {
     console.error("Error in GET /sites/:siteId/scans", err);
@@ -90,28 +108,33 @@ app.get("/sites/:siteId/scans/latest", async (req, res) => {
       });
     }
 
-    res.json(latest);
+    res.json(serializeScanRun(latest));
   } catch (err) {
     console.error("Error in GET /sites/:siteId/scans/latest", err);
     res.status(500).json({ error: "internal_error" });
   }
 });
 
+
 // NEW: Get a scan run by id (live progress polling)
 app.get("/scan-runs/:scanRunId", async (req, res) => {
   const scanRunId = req.params.scanRunId;
+  console.log("[api] GET /scan-runs/:scanRunId", scanRunId);
 
   try {
     const run = await getScanRunById(scanRunId);
 
     if (!run) {
+      console.log("[api] Scan run not found:", scanRunId);
       return res.status(404).json({
         error: "scan_run_not_found",
         message: `No scan run found with id ${scanRunId}`,
       });
     }
 
-    return res.json(run);
+    const serialized = serializeScanRun(run);
+    console.log("[api] Returning scan run:", serialized);
+    return res.json(serialized);
   } catch (err) {
     console.error("Error in GET /scan-runs/:scanRunId", err);
     return res.status(500).json({ error: "internal_error" });
@@ -156,15 +179,21 @@ app.post("/sites/:siteId/scans", async (req, res) => {
   }
 
   try {
-    const summary = await runScanForSite(siteId, body.startUrl);
+    // Get the scanRunId synchronously (from createScanRun)
+    const { getScanRunIdOnly } = await import("../../../packages/crawler/src/scanService.js");
+    const scanRunId = await getScanRunIdOnly(siteId, body.startUrl);
 
+    // Return immediately with the scanRunId
     res.status(201).json({
-      scanRunId: summary.scanRunId,
+      scanRunId,
       siteId,
       startUrl: body.startUrl,
-      totalLinks: summary.totalLinks,
-      checkedLinks: summary.checkedLinks,
-      brokenLinks: summary.brokenLinks,
+    });
+
+    // Run the scan in the background (fire-and-forget) with the same scanRunId
+    // The frontend will poll /scan-runs/:scanRunId or use SSE for progress
+    runScanForSite(siteId, body.startUrl, scanRunId).catch((err) => {
+      console.error("Background scan error for site", siteId, ":", err);
     });
   } catch (err) {
     console.error("Error in POST /sites/:siteId/scans", err);
@@ -202,30 +231,6 @@ app.get("/scan-runs/:scanRunId/results", async (req, res) => {
     res.status(500).json({ error: "internal_error" });
   }
 });
-
-// Get a single scan run by id (for live progress)
-app.get("/scan-runs/:scanRunId", async (req, res) => {
-  const scanRunId = req.params.scanRunId;
-
-  try {
-    // We can fetch it via scan_results table? No — better from scan_runs.
-    // So we need a DB helper in scans.js (Step 2 below).
-    const run = await (getScanRunById as any)(scanRunId);
-
-    if (!run) {
-      return res.status(404).json({
-        error: "scan_run_not_found",
-        message: `No scan run found with id ${scanRunId}`,
-      });
-    }
-
-    return res.json(run);
-  } catch (err) {
-    console.error("Error in GET /scan-runs/:scanRunId", err);
-    return res.status(500).json({ error: "internal_error" });
-  }
-});
-
 
 // Delete a site (and its scans/results)
 app.delete("/sites/:siteId", async (req, res) => {
