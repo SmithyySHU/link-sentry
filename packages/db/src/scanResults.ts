@@ -12,6 +12,12 @@ export interface ScanResultRow {
   created_at: Date;
 }
 
+export interface PaginatedResults {
+  results: ScanResultRow[];
+  countReturned: number;
+  totalMatching: number;
+}
+
 export async function insertScanResult(args: {
   scanRunId: string;
   sourcePage: string;
@@ -56,13 +62,37 @@ export async function insertScanResult(args: {
 
 export async function getResultsForScanRun(
   scanRunId: string,
-  options?: { limit?: number; offset?: number }
-): Promise<ScanResultRow[]> {
+  options?: { limit?: number; offset?: number; classification?: LinkClassification }
+): Promise<PaginatedResults> {
   const client = await ensureConnected();
 
   const limit = options?.limit ?? 200;
   const offset = options?.offset ?? 0;
+  const classification = options?.classification;
 
+  // Build WHERE clause
+  let whereClause = "WHERE scan_run_id = $1";
+  const params: Array<string | number> = [scanRunId];
+  
+  if (classification) {
+    whereClause += " AND classification = $2";
+    params.push(classification);
+  }
+
+  // Get total count
+  const countRes = await client.query<{ count: string }>(
+    `
+      SELECT COUNT(*) as count
+      FROM scan_results
+      ${whereClause}
+    `,
+    params
+  );
+
+  const totalMatching = Number(countRes.rows[0]?.count ?? 0);
+
+  // Get paginated results
+  const paramIndex = params.length + 1;
   const res = await client.query<ScanResultRow>(
     `
       SELECT
@@ -75,16 +105,20 @@ export async function getResultsForScanRun(
         error_message,
         created_at
       FROM scan_results
-      WHERE scan_run_id = $1
+      ${whereClause}
       ORDER BY
         (classification <> 'ok') DESC,
         created_at DESC
-      LIMIT $2 OFFSET $3
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
     `,
-    [scanRunId, limit, offset]
+    [...params, limit, offset]
   );
 
-  return res.rows;
+  return {
+    results: res.rows,
+    countReturned: res.rows.length,
+    totalMatching,
+  };
 }
 export interface ResultsSummary {
   classification: LinkClassification;

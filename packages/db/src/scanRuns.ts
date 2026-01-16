@@ -1,7 +1,5 @@
 import { ensureConnected } from "./client.js";
 
-console.log("[db] scanRuns loaded from:", import.meta.url);
-
 export type ScanStatus = "in_progress" | "completed" | "failed";
 export type LinkClassification = "ok" | "broken" | "blocked";
 
@@ -39,8 +37,6 @@ export async function updateScanRunProgress(
   const checkedLinks = typeof fields.checkedLinks === "number" ? fields.checkedLinks : null;
   const brokenLinks = typeof fields.brokenLinks === "number" ? fields.brokenLinks : null;
 
-  console.log("[db] updateScanRunProgress", scanRunId, fields);
-
   await db.query(
     `
     UPDATE scan_runs
@@ -75,8 +71,6 @@ export async function completeScanRun(
   const client = await ensureConnected();
   const { totalLinks, checkedLinks, brokenLinks } = summary;
 
-  console.log("[db] completeScanRun", scanRunId, "status:", status, "summary:", summary);
-
   await client.query(
     `
     UPDATE scan_runs
@@ -89,8 +83,6 @@ export async function completeScanRun(
     `,
     [scanRunId, status, totalLinks, checkedLinks, brokenLinks]
   );
-
-  console.log("[db] completeScanRun completed for", scanRunId);
 }
 
 export async function getLatestScanForSite(siteId: string) {

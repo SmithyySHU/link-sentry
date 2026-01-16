@@ -8,21 +8,28 @@ const BLOCKED_HOSTS = new Set([
   "accounts.google.com",
 ]);
 
-const BLOCKED_STATUS = new Set([401, 403, 429]);
 const BROKEN_STATUS = new Set([404, 410]);
 
-export function classifyStatus(url: string, status?: number): LinkVerdict {
+const BOT_PROTECTION_SERVERS = ["cloudflare", "akamai", "imperva", "fastly"];
+
+type HeaderMap = Record<string, string> | undefined;
+
+export function classifyStatus(url: string, status?: number, headers?: HeaderMap): LinkVerdict {
   // Network error / DNS / fetch failed etc
   if (status == null) return "broken";
 
   // OK + redirects
   if (status >= 200 && status < 400) return "ok";
 
-  // If the server says “you can’t access this / slow down / login”
-  // treat as BLOCKED (not broken) – this is the big change.
-  if (BLOCKED_STATUS.has(status)) return "blocked";
-
   const host = safeHost(url);
+
+  // Treat 401/429 as blocked by default; 403 only when we see bot/auth signals.
+  if (status === 401 || status === 403 || status === 429) {
+    const blockedSignals = hasBlockedSignals(host, headers);
+    if (blockedSignals) return "blocked";
+    if (status === 403) return "broken";
+    return "blocked";
+  }
 
   // Extra blocked host safety (kept from your original code)
   if (host && isBlockedHost(host) && (status === 400 || status === 405 || status === 406)) {
@@ -46,6 +53,23 @@ function safeHost(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+function hasBlockedSignals(host: string | null, headers?: HeaderMap): boolean {
+  if (host && isBlockedHost(host)) return true;
+  if (!headers) return false;
+
+  if (headers["www-authenticate"]) return true;
+  if (headers["cf-ray"] || headers["cf-mitigated"]) return true;
+
+  const server = headers["server"]?.toLowerCase();
+  if (server) {
+    for (const marker of BOT_PROTECTION_SERVERS) {
+      if (server.includes(marker)) return true;
+    }
+  }
+
+  return false;
 }
 
 function isBlockedHost(hostname: string): boolean {

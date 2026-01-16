@@ -9,6 +9,10 @@ import {
   updateScanRunProgress,
 } from "../../db/src/scanRuns";
 import { insertScanResult } from "../../db/src/scanResults.js";
+import {
+  upsertScanLink,
+  insertScanLinkOccurrence,
+} from "../../db/src/scanLinksDedup.js";
 
 export interface ScanExecutionSummary {
   scanRunId: string;
@@ -90,7 +94,7 @@ export async function runScanForSite(
   startUrl: string,
   scanRunId?: string
 ): Promise<ScanExecutionSummary> {
-  // ✅ IMPORTANT: force this to be a real string (fixes TS errors)
+  // Ensure the scan run exists before any background work starts.
   const actualScanRunId: string =
     scanRunId ?? (await createScanRun(siteId, startUrl));
 
@@ -100,6 +104,7 @@ export async function runScanForSite(
   const LINK_CONCURRENCY = 8;
   const INSERT_CONCURRENCY = 12;
 
+  // Concurrency caps protect both the target site and our DB.
   const limitPage = createLimiter(PAGE_CONCURRENCY);
   const limitLink = createLimiter(LINK_CONCURRENCY);
   const limitInsert = createLimiter(INSERT_CONCURRENCY);
@@ -116,6 +121,7 @@ export async function runScanForSite(
   let lastChecked = 0;
   let lastBroken = 0;
 
+  // Debounce progress updates to avoid noisy DB writes on every link.
   const scheduleProgressWrite = (totalLinks: number) => {
     if (progressTimer) return;
     progressTimer = setTimeout(async () => {
@@ -164,7 +170,7 @@ export async function runScanForSite(
 
     const p = limitLink(async () => {
       const r = await validateLink(url);
-      const verdict = classifyStatus(url, r.status ?? undefined) as ValidationResult["verdict"];
+      const verdict = classifyStatus(url, r.status ?? undefined, r.headers) as ValidationResult["verdict"];
 
       if (!validatedOnce.has(url)) {
         validatedOnce.add(url);
@@ -188,14 +194,34 @@ export async function runScanForSite(
   const insertOccurrence = async (sourcePage: string, linkUrl: string) => {
     const v = await getValidation(linkUrl);
 
-    // ✅ FIX: always use actualScanRunId (never the optional scanRunId param)
-    await insertScanResult({
+    // ✅ Optional: write to legacy scan_results (disabled by default)
+    const writeLegacy = process.env.WRITE_LEGACY_SCAN_RESULTS === "true";
+    if (writeLegacy) {
+      await insertScanResult({
+        scanRunId: actualScanRunId,
+        sourcePage,
+        linkUrl,
+        statusCode: v.status,
+        classification: v.verdict,
+        errorMessage: v.ok ? undefined : v.error,
+      });
+    }
+
+    // ✅ Write to dedup tables (new primary storage)
+    const scanLink = await upsertScanLink({
       scanRunId: actualScanRunId,
-      sourcePage,
       linkUrl,
-      statusCode: v.status,
       classification: v.verdict,
+      statusCode: v.status,
       errorMessage: v.ok ? undefined : v.error,
+    });
+
+    // ✅ Track this specific occurrence
+    await insertScanLinkOccurrence({
+      scanLinkId: scanLink.id,
+      scanRunId: actualScanRunId,
+      linkUrl,
+      sourcePage,
     });
   };
 

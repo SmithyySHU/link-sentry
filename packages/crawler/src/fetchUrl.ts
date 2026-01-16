@@ -197,8 +197,9 @@ export default async function fetchUrl(
     }
 
     return await res.text();
-  } catch (err: any) {
-    if (err?.name === "AbortError") {
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err : null;
+    if (error?.name === "AbortError") {
       console.error("Timed out fetching URL", {
         url: rawUrl,
         timeoutMs,
@@ -206,7 +207,7 @@ export default async function fetchUrl(
     } else {
       console.error("Error fetching URL", {
         url: rawUrl,
-        error: err,
+        error,
       });
     }
     return null;
@@ -214,4 +215,3 @@ export default async function fetchUrl(
     clearTimeout(timer);
   }
 }
-

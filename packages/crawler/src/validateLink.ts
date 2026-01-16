@@ -1,6 +1,14 @@
 export type LinkCheckResult =
-  | { ok: true; status: number }
-  | { ok: false; status: number | null; error: string };
+  | { ok: true; status: number; headers: Record<string, string> }
+  | { ok: false; status: number | null; error: string; headers?: Record<string, string> };
+
+function normalizeHeaders(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    out[key.toLowerCase()] = value;
+  });
+  return out;
+}
 
 export default async function validateLink(
   url: string,
@@ -34,15 +42,17 @@ export default async function validateLink(
       });
     }
 
+    const normalizedHeaders = normalizeHeaders(res.headers);
     return res.ok
-      ? { ok: true, status: res.status }
-      : { ok: false, status: res.status, error: `HTTP ${res.status}` };
-  } catch (err: any) {
+      ? { ok: true, status: res.status, headers: normalizedHeaders }
+      : { ok: false, status: res.status, error: `HTTP ${res.status}`, headers: normalizedHeaders };
+  } catch (err: unknown) {
+    const error = err instanceof Error ? err : null;
     const msg =
-      err?.name === "AbortError"
+      error?.name === "AbortError"
         ? "timeout"
-        : typeof err?.message === "string"
-          ? err.message
+        : typeof error?.message === "string"
+          ? error.message
           : "request failed";
     return { ok: false, status: null, error: msg };
   } finally {

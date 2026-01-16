@@ -30,7 +30,7 @@ export function mountScanRunEvents(app: Application) {
     // helps with proxies + express buffering
     if (typeof res.flushHeaders === "function") res.flushHeaders();
 
-    const send = (event: string, data: any) => {
+    const send = (event: string, data: unknown) => {
       res.write(`event: ${event}\n`);
       res.write(`data: ${JSON.stringify(data)}\n\n`);
     };
@@ -56,10 +56,11 @@ export function mountScanRunEvents(app: Application) {
       const json = JSON.stringify(serialized);
       if (json !== lastJson) {
         lastJson = json;
-        send("run", serialized);
+        send("scan_run", serialized);
       }
 
       if (run.status !== "in_progress") {
+        send("scan_run", serialized);
         send("done", { status: run.status, scanRunId: run.id });
         res.end();
       }

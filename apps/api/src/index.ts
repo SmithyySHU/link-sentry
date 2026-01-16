@@ -1,8 +1,8 @@
 import express from "express";
 import cors from "cors";
 import type { ScanRunRow } from "../../../packages/db/src/scans";
-
-
+import type { LinkClassification } from "../../../packages/db/src/scanRuns.js";
+import type { ScanLinkOccurrenceRow } from "../../../packages/db/src/scanLinksDedup.js";
 
 import {
   getLatestScanForSite,
@@ -18,11 +18,16 @@ import {
 } from "../../../packages/db/src/sites.js";
 
 import { getResultsForScanRun, getResultsSummaryForScanRun } from "../../../packages/db/src/scanResults.js";
+import {
+  getScanLinksForRun,
+  getOccurrencesForScanLink,
+} from "../../../packages/db/src/scanLinksDedup.js";
 import { runScanForSite } from "../../../packages/crawler/src/scanService.js";
 
 import { mountScanRunEvents } from "./routes/scanRunEvents";
 
 const DEMO_USER_ID = "00000000-0000-0000-0000-000000000000";
+const LINK_CLASSIFICATIONS = new Set<LinkClassification>(["ok", "broken", "blocked"]);
 
 // Helper to serialize ScanRunRow for JSON response
 function serializeScanRun(run: ScanRunRow) {
@@ -37,6 +42,15 @@ function serializeScanRun(run: ScanRunRow) {
     checked_links: run.checked_links,
     broken_links: run.broken_links,
   };
+}
+
+function parseClassification(value: unknown): LinkClassification | undefined {
+  if (typeof value !== "string") return undefined;
+  return LINK_CLASSIFICATIONS.has(value as LinkClassification) ? (value as LinkClassification) : undefined;
+}
+
+function getErrorMessage(err: unknown) {
+  return err instanceof Error ? err.message : String(err);
 }
 
 const app = express();
@@ -61,11 +75,11 @@ app.get("/sites", async (req, res) => {
       count: sites.length,
       sites,
     });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Error fetching sites", err);
     res.status(500).json({
       error: "Failed to fetch sites",
-      details: err?.message ?? String(err),
+      details: getErrorMessage(err),
     });
   }
 });
@@ -88,7 +102,7 @@ app.get("/sites/:siteId/scans", async (req, res) => {
       count: scans.length,
       scans: scans.map(serializeScanRun),
     });
-  } catch (err) {
+  } catch (err: unknown) {
     console.error("Error in GET /sites/:siteId/scans", err);
     res.status(500).json({ error: "internal_error" });
   }
@@ -109,23 +123,20 @@ app.get("/sites/:siteId/scans/latest", async (req, res) => {
     }
 
     res.json(serializeScanRun(latest));
-  } catch (err) {
+  } catch (err: unknown) {
     console.error("Error in GET /sites/:siteId/scans/latest", err);
     res.status(500).json({ error: "internal_error" });
   }
 });
 
-
 // NEW: Get a scan run by id (live progress polling)
 app.get("/scan-runs/:scanRunId", async (req, res) => {
   const scanRunId = req.params.scanRunId;
-  console.log("[api] GET /scan-runs/:scanRunId", scanRunId);
 
   try {
     const run = await getScanRunById(scanRunId);
 
     if (!run) {
-      console.log("[api] Scan run not found:", scanRunId);
       return res.status(404).json({
         error: "scan_run_not_found",
         message: `No scan run found with id ${scanRunId}`,
@@ -133,9 +144,8 @@ app.get("/scan-runs/:scanRunId", async (req, res) => {
     }
 
     const serialized = serializeScanRun(run);
-    console.log("[api] Returning scan run:", serialized);
     return res.json(serialized);
-  } catch (err) {
+  } catch (err: unknown) {
     console.error("Error in GET /scan-runs/:scanRunId", err);
     return res.status(500).json({ error: "internal_error" });
   }
@@ -157,11 +167,11 @@ app.post("/sites", async (req, res) => {
     const site = await createSite(userId, url);
 
     res.status(201).json({ site });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Error creating site", err);
     res.status(500).json({
       error: "Failed to create site",
-      details: err?.message ?? String(err),
+      details: getErrorMessage(err),
     });
   }
 });
@@ -195,7 +205,7 @@ app.post("/sites/:siteId/scans", async (req, res) => {
     runScanForSite(siteId, body.startUrl, scanRunId).catch((err) => {
       console.error("Background scan error for site", siteId, ":", err);
     });
-  } catch (err) {
+  } catch (err: unknown) {
     console.error("Error in POST /sites/:siteId/scans", err);
     res.status(500).json({ error: "internal_error" });
   }
@@ -206,9 +216,11 @@ app.get("/scan-runs/:scanRunId/results", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   const limitRaw = req.query.limit;
   const offsetRaw = req.query.offset;
+  const classificationRaw = req.query.classification;
 
   const limit = limitRaw ? Number(limitRaw) : 200;
   const offset = offsetRaw ? Number(offsetRaw) : 0;
+  const classification = parseClassification(classificationRaw);
 
   if (Number.isNaN(limit) || limit <= 0) {
     return res.status(400).json({ error: "invalid_limit" });
@@ -219,14 +231,20 @@ app.get("/scan-runs/:scanRunId/results", async (req, res) => {
   }
 
   try {
-    const results = await getResultsForScanRun(scanRunId, { limit, offset });
+    const paginatedResults = await getResultsForScanRun(scanRunId, {
+      limit,
+      offset,
+      classification,
+    });
 
     res.json({
       scanRunId,
-      count: results.length,
-      results,
+      classification,
+      countReturned: paginatedResults.countReturned,
+      totalMatching: paginatedResults.totalMatching,
+      results: paginatedResults.results,
     });
-  } catch (err) {
+  } catch (err: unknown) {
     console.error("Error in GET /scan-runs/:scanRunId/results", err);
     res.status(500).json({ error: "internal_error" });
   }
@@ -243,8 +261,144 @@ app.get("/scan-runs/:scanRunId/results/summary", async (req, res) => {
       scanRunId,
       summary,
     });
-  } catch (err) {
+  } catch (err: unknown) {
     console.error("Error in GET /scan-runs/:scanRunId/results/summary", err);
+    res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// ✅ NEW: Get unique links (deduplicated) from a scan run
+app.get("/scan-runs/:scanRunId/links", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+  const classificationRaw = req.query.classification;
+
+  const limit = limitRaw ? Number(limitRaw) : 200;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+  const classification = parseClassification(classificationRaw);
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return res.status(400).json({ error: "invalid_limit" });
+  }
+
+  if (Number.isNaN(offset) || offset < 0) {
+    return res.status(400).json({ error: "invalid_offset" });
+  }
+
+  try {
+    const paginatedLinks = await getScanLinksForRun(scanRunId, {
+      limit,
+      offset,
+      classification,
+    });
+
+    // Serialize Date fields to ISO strings
+    const serializedLinks = paginatedLinks.links.map((link) => ({
+      ...link,
+      first_seen_at: link.first_seen_at instanceof Date ? link.first_seen_at.toISOString() : link.first_seen_at,
+      last_seen_at: link.last_seen_at instanceof Date ? link.last_seen_at.toISOString() : link.last_seen_at,
+      created_at: link.created_at instanceof Date ? link.created_at.toISOString() : link.created_at,
+      updated_at: link.updated_at instanceof Date ? link.updated_at.toISOString() : link.updated_at,
+    }));
+
+    res.json({
+      scanRunId,
+      classification,
+      countReturned: paginatedLinks.countReturned,
+      totalMatching: paginatedLinks.totalMatching,
+      links: serializedLinks,
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /scan-runs/:scanRunId/links", err);
+    res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// ✅ NEW: Get occurrences of a specific link
+app.get("/scan-runs/:scanRunId/links/:scanLinkId/occurrences", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  const scanLinkId = req.params.scanLinkId;
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+
+  const limit = limitRaw ? Number(limitRaw) : 100;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return res.status(400).json({ error: "invalid_limit" });
+  }
+
+  if (Number.isNaN(offset) || offset < 0) {
+    return res.status(400).json({ error: "invalid_offset" });
+  }
+
+  try {
+    const paginatedOccurrences = await getOccurrencesForScanLink(scanLinkId, {
+      limit,
+      offset,
+    });
+
+    // Serialize Date fields to ISO strings
+    const serializedOccurrences = paginatedOccurrences.occurrences.map((occ: ScanLinkOccurrenceRow) => ({
+      ...occ,
+      created_at: occ.created_at instanceof Date ? occ.created_at.toISOString() : occ.created_at,
+    }));
+
+    res.json({
+      scanRunId,
+      scanLinkId,
+      countReturned: paginatedOccurrences.countReturned,
+      totalMatching: paginatedOccurrences.totalMatching,
+      occurrences: serializedOccurrences,
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /scan-runs/:scanRunId/links/:scanLinkId/occurrences", err);
+    res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// ✅ NEW: Get occurrences of a specific scan link (direct route without scanRunId)
+// curl -s "http://localhost:3001/scan-links/<scanLinkId>/occurrences?limit=5&offset=0"
+app.get("/scan-links/:scanLinkId/occurrences", async (req, res) => {
+  const scanLinkId = req.params.scanLinkId;
+  if (!scanLinkId) {
+    return res.status(400).json({ error: "missing_scan_link_id" });
+  }
+  const limitRaw = req.query.limit;
+  const offsetRaw = req.query.offset;
+
+  const limit = limitRaw ? Number(limitRaw) : 50;
+  const offset = offsetRaw ? Number(offsetRaw) : 0;
+
+  if (Number.isNaN(limit) || limit <= 0) {
+    return res.status(400).json({ error: "invalid_limit" });
+  }
+
+  if (Number.isNaN(offset) || offset < 0) {
+    return res.status(400).json({ error: "invalid_offset" });
+  }
+
+  try {
+    const result = await getOccurrencesForScanLink(scanLinkId, {
+      limit,
+      offset,
+    });
+
+    // Serialize Date fields to ISO strings
+    const serializedOccurrences = result.occurrences.map((occ) => ({
+      ...occ,
+      created_at: occ.created_at instanceof Date ? occ.created_at.toISOString() : occ.created_at,
+    }));
+
+    res.json({
+      scanLinkId: result.scanLinkId,
+      countReturned: result.countReturned,
+      totalMatching: result.totalMatching,
+      occurrences: serializedOccurrences,
+    });
+  } catch (err: unknown) {
+    console.error("Error in GET /scan-links/:scanLinkId/occurrences", err);
     res.status(500).json({ error: "internal_error" });
   }
 });
@@ -273,11 +427,11 @@ app.delete("/sites/:siteId", async (req, res) => {
     }
 
     return res.status(204).send();
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error("Error deleting site", err);
     return res.status(500).json({
       error: "Failed to delete site",
-      details: err?.message ?? String(err),
+      details: getErrorMessage(err),
     });
   }
 });
