@@ -48,13 +48,11 @@ The crawler entry point for fetching HTML is `packages/crawler/src/fetchUrl.ts`.
 When a URL is passed into the crawler:
 
 1. **URL parsing and protocol allow-list**
-
    - The URL is parsed with `new URL(rawUrl)`.
    - Only `http:` and `https:` protocols are allowed.
    - Any other protocol (for example `file:`, `ftp:`, `gopher:`, etc.) is rejected.
 
 2. **Hostname resolution and IP allow-list**
-
    - The hostname is resolved via DNS (`dns/promises.lookup`).
    - Every resolved address is checked:
      - Private IPv4 ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
@@ -63,7 +61,6 @@ When a URL is passed into the crawler:
    - If any resolved address is private or loopback, the crawl is rejected with an error.
 
 3. **Redirect handling**
-
    - Fetch is performed with `redirect: "manual"`.
    - Up to a fixed number of redirects are followed.
    - Each redirect target is:
@@ -73,7 +70,6 @@ When a URL is passed into the crawler:
    - If the redirect chain is too long, the crawl is aborted.
 
 4. **Timeout and content-type checks**
-
    - Requests are bounded by a timeout (`HTML_FETCH_TIMEOUT_MS`) using `AbortController`.
    - Only responses with `content-type` including `text/html` are processed.  
      Others are ignored for link crawling purposes.
@@ -137,9 +133,10 @@ For now:
 - This issue affects **local development environments only**, not production deployments of Link-Sentry.
 - We treat it as a **known limitation of the current dev toolchain**.
 
-> **Decision:**  
-> - We accept this risk for ongoing development.  
-> - We will revisit the toolchain (Vite / esbuild / tsx versions) before a production release and upgrade to a version where `esbuild` is patched.  
+> **Decision:**
+>
+> - We accept this risk for ongoing development.
+> - We will revisit the toolchain (Vite / esbuild / tsx versions) before a production release and upgrade to a version where `esbuild` is patched.
 > - Developers should avoid exposing local dev servers to untrusted networks and should only run them on their own machines.
 
 ---

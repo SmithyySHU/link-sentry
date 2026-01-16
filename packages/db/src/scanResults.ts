@@ -120,6 +120,7 @@ export async function getResultsForScanRun(
     totalMatching,
   };
 }
+
 export interface ResultsSummary {
   classification: LinkClassification;
   status_code: number | null;

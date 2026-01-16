@@ -7,7 +7,7 @@
     "dev": "tsx src/testConnection.ts",
     "demo:latest-scan": "node --import tsx src/printLatestScan.ts",
     "demo:site-history": "node --import tsx src/printSiteHistory.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "dotenv": "^16.4.5",

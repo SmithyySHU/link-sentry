@@ -13,10 +13,12 @@
     "demo:latest-scan": "npm run -w @link-sentry/db demo:latest-scan",
     "demo:site-history": "npm run -w @link-sentry/db demo:site-history --",
     "scan:once": "npm run -w @link-sentry/crawler scan:once --",
-    "typecheck": "tsc -p packages/crawler && tsc -p packages/db"
-    
+    "typecheck": "tsc -p packages/crawler && tsc -p packages/db",
+    "format": "prettier . --write",
+    "format:check": "prettier . --check"
   },
   "devDependencies": {
+    "prettier": "^3.3.3",
     "tsx": "^4.20.5",
     "typescript": "^5.6.3"
   },

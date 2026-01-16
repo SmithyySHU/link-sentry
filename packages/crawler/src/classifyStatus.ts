@@ -1,4 +1,4 @@
-export type LinkVerdict = "ok" | "broken" | "blocked";
+export type LinkVerdict = "ok" | "broken" | "blocked" | "no_response";
 
 const BLOCKED_HOSTS = new Set([
   "googleusercontent.com",
@@ -10,29 +10,30 @@ const BLOCKED_HOSTS = new Set([
 
 const BROKEN_STATUS = new Set([404, 410]);
 
-const BOT_PROTECTION_SERVERS = ["cloudflare", "akamai", "imperva", "fastly"];
-
 type HeaderMap = Record<string, string> | undefined;
 
-export function classifyStatus(url: string, status?: number, headers?: HeaderMap): LinkVerdict {
+export function classifyStatus(
+  url: string,
+  status?: number,
+  _headers?: HeaderMap,
+): LinkVerdict {
   // Network error / DNS / fetch failed etc
-  if (status == null) return "broken";
+  if (status == null) return "no_response";
 
   // OK + redirects
   if (status >= 200 && status < 400) return "ok";
 
   const host = safeHost(url);
 
-  // Treat 401/429 as blocked by default; 403 only when we see bot/auth signals.
-  if (status === 401 || status === 403 || status === 429) {
-    const blockedSignals = hasBlockedSignals(host, headers);
-    if (blockedSignals) return "blocked";
-    if (status === 403) return "broken";
-    return "blocked";
-  }
+  // Treat 401/403/429 as blocked by default (auth/bot protection is common here).
+  if (status === 401 || status === 403 || status === 429) return "blocked";
 
   // Extra blocked host safety (kept from your original code)
-  if (host && isBlockedHost(host) && (status === 400 || status === 405 || status === 406)) {
+  if (
+    host &&
+    isBlockedHost(host) &&
+    (status === 400 || status === 405 || status === 406)
+  ) {
     // Some Google endpoints return odd 4xx when hit without proper headers
     return "blocked";
   }
@@ -53,23 +54,6 @@ function safeHost(url: string): string | null {
   } catch {
     return null;
   }
-}
-
-function hasBlockedSignals(host: string | null, headers?: HeaderMap): boolean {
-  if (host && isBlockedHost(host)) return true;
-  if (!headers) return false;
-
-  if (headers["www-authenticate"]) return true;
-  if (headers["cf-ray"] || headers["cf-mitigated"]) return true;
-
-  const server = headers["server"]?.toLowerCase();
-  if (server) {
-    for (const marker of BOT_PROTECTION_SERVERS) {
-      if (server.includes(marker)) return true;
-    }
-  }
-
-  return false;
 }
 
 function isBlockedHost(hostname: string): boolean {

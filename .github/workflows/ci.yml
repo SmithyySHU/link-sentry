@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect Node version
+        run: |
+          if [ -f .nvmrc ]; then
+            NODE_VERSION="$(cat .nvmrc | tr -d ' \t\n\r')"
+          else
+            NODE_VERSION=20
+          fi
+          echo "NODE_VERSION=$NODE_VERSION" >> "$GITHUB_ENV"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Workspace typecheck
+        run: npm -ws run typecheck
+
+      - name: Workspace lint
+        run: npm -ws run lint --if-present
+
+      - name: Workspace build
+        run: npm -ws run build --if-present
+
+      - name: Root typecheck
+        run: npm run typecheck --if-present
+
+      - name: Root lint
+        run: npm run lint --if-present
+
+      - name: Root build
+        run: npm run build --if-present
