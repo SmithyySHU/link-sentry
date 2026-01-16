@@ -8,7 +8,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@link-sentry/db": "workspace:*",
+    "@link-sentry/db": "*",
     "cors": "^2.8.5",
     "express": "^4.21.2"
   },

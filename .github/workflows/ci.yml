@@ -33,6 +33,18 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
 
+      - name: Node version
+        run: node -v
+
+      - name: NPM version
+        run: npm -v
+
+      - name: Upgrade npm
+        run: npm i -g npm@latest
+
+      - name: NPM version (upgraded)
+        run: npm -v
+
       - name: Install dependencies
         run: npm ci
 
