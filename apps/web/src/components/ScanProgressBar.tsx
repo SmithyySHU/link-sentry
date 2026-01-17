@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 type ScanProgressProps = {
-  status: "in_progress" | "completed" | "failed" | "cancelled";
+  status: "queued" | "in_progress" | "completed" | "failed" | "cancelled";
   totalLinks: number;
   checkedLinks: number;
   brokenLinks: number;
@@ -55,11 +55,13 @@ export const ScanProgressBar: React.FC<ScanProgressProps> = ({
         ? "stopped"
         : "running";
   const title =
-    status === "completed"
-      ? "Scan completed"
-      : status === "failed" || status === "cancelled"
-        ? "Scan stopped"
-        : "Scanning…";
+    status === "queued"
+      ? "Queued…"
+      : status === "completed"
+        ? "Scan completed"
+        : status === "failed" || status === "cancelled"
+          ? "Scan stopped"
+          : "Scanning…";
 
   return (
     <div className={`scan-progress ${stateClass}`}>
@@ -72,7 +74,7 @@ export const ScanProgressBar: React.FC<ScanProgressProps> = ({
             </span>
             <span>Broken {brokenLinks}</span>
             <span>Blocked {blockedLinks}</span>
-            <span>Timed out {noResponseLinks}</span>
+            <span>No response {noResponseLinks}</span>
             <span>Last updated {formatRelativeTime(lastUpdateAt, now)}</span>
           </div>
         </div>

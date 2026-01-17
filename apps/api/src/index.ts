@@ -9,10 +9,14 @@ import type {
 } from "@link-sentry/db";
 import {
   applyIgnoreRulesForScanRun,
+  cancelScanJob,
   cancelScanRun,
   createIgnoreRule,
+  createScanRun,
   deleteIgnoreRule,
+  enqueueScanJob,
   getDiffBetweenRuns,
+  getJobForScanRun,
   getLatestScanForSite,
   getOccurrencesForScanLink,
   getRecentScanRunsForSite,
@@ -22,11 +26,14 @@ import {
   getScanLinkById,
   getScanLinkByRunAndUrl,
   getScanLinksForExport,
+  getScanLinksForExportFiltered,
   getScanLinksForRun,
   getScanLinksSummary,
   getScanRunById,
   getSiteById,
+  getSiteNotificationSettings,
   getSitesForUser,
+  getSiteSchedule,
   getTimeoutCountForRun,
   getTopLinksByClassification,
   insertIgnoredOccurrence,
@@ -36,14 +43,20 @@ import {
   listIgnoredOccurrences,
   setIgnoreRuleEnabled,
   setScanLinkIgnoredForRun,
+  setScanRunStatus,
+  updateSiteNotificationSettings,
+  updateSiteSchedule,
+  updateScanLinkAfterRecheck,
   upsertIgnoredLink,
   createSite,
   deleteSite,
 } from "@link-sentry/db";
-import { runScanForSite } from "../../../packages/crawler/src/scanService.js";
+import validateLink from "../../../packages/crawler/src/validateLink.js";
+import { classifyStatus } from "../../../packages/crawler/src/classifyStatus.js";
 
 import { mountScanRunEvents } from "./routes/scanRunEvents";
 import { serializeScanRun } from "./serializers";
+import { notifyIfNeeded, sendTestEmail } from "./notifyOnScanComplete";
 
 const DEMO_USER_ID = "00000000-0000-0000-0000-000000000000";
 const LINK_CLASSIFICATIONS = new Set<LinkClassification>([
@@ -61,6 +74,38 @@ const EXPORT_CLASSIFICATIONS = new Set<ExportClassification>([
   "timeout",
 ]);
 const STATUS_GROUPS = new Set(["all", "no_response", "http_error"]);
+const STATUS_FILTERS = new Set(["401/403/429", "404", "5xx", "no_response"]);
+const EXPORT_SORT_OPTIONS = new Set([
+  "severity",
+  "occ_desc",
+  "status_asc",
+  "status_desc",
+  "recent",
+]);
+const SCHEDULE_FREQUENCIES = new Set(["daily", "weekly"]);
+const EMAIL_TEST_TO = process.env.EMAIL_TEST_TO;
+
+function isValidTimeUtc(value: string) {
+  const parts = value.split(":");
+  if (parts.length < 2) return false;
+  const hours = Number(parts[0]);
+  const minutes = Number(parts[1]);
+  if (Number.isNaN(hours) || Number.isNaN(minutes)) return false;
+  if (hours < 0 || hours > 23) return false;
+  if (minutes < 0 || minutes > 59) return false;
+  return true;
+}
+
+function isValidEmail(value: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+}
+
+type ExportSortOption =
+  | "severity"
+  | "occ_desc"
+  | "status_asc"
+  | "status_desc"
+  | "recent";
 const IGNORE_RULE_TYPES = new Set<IgnoreRuleType>([
   "contains",
   "regex",
@@ -92,6 +137,22 @@ function parseStatusGroup(
   return STATUS_GROUPS.has(value)
     ? (value as "all" | "no_response" | "http_error")
     : "all";
+}
+
+function parseStatusFilters(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  const parts = value
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.filter((part) => STATUS_FILTERS.has(part));
+}
+
+function parseSortOption(value: unknown): ExportSortOption {
+  if (typeof value !== "string") return "severity";
+  return EXPORT_SORT_OPTIONS.has(value)
+    ? (value as ExportSortOption)
+    : "severity";
 }
 
 function parseIgnoreRuleType(value: unknown): IgnoreRuleType | null {
@@ -167,6 +228,178 @@ app.get("/sites", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error fetching sites", err);
     sendInternalError(res, "Failed to fetch sites", err);
+  }
+});
+
+app.get("/sites/:siteId/schedule", async (req, res) => {
+  const siteId = req.params.siteId;
+  try {
+    const schedule = await getSiteSchedule(siteId);
+    if (!schedule) {
+      return sendApiError(res, 404, "site_not_found", "Site not found");
+    }
+    res.json({ siteId, ...schedule });
+  } catch (err: unknown) {
+    console.error("Error in GET /sites/:siteId/schedule", err);
+    sendInternalError(res, "Failed to fetch schedule", err);
+  }
+});
+
+app.put("/sites/:siteId/schedule", async (req, res) => {
+  const siteId = req.params.siteId;
+  const { enabled, frequency, timeUtc, dayOfWeek } = req.body ?? {};
+
+  if (typeof enabled !== "boolean") {
+    return sendApiError(res, 400, "invalid_enabled", "enabled must be boolean");
+  }
+  if (typeof frequency !== "string" || !SCHEDULE_FREQUENCIES.has(frequency)) {
+    return sendApiError(
+      res,
+      400,
+      "invalid_frequency",
+      "frequency must be daily or weekly",
+    );
+  }
+  if (typeof timeUtc !== "string" || !isValidTimeUtc(timeUtc)) {
+    return sendApiError(res, 400, "invalid_time", "timeUtc must be HH:MM");
+  }
+  const frequencyValue = frequency === "daily" ? "daily" : "weekly";
+  let resolvedDay: number | null = null;
+  if (frequencyValue === "weekly") {
+    if (typeof dayOfWeek !== "number" || dayOfWeek < 0 || dayOfWeek > 6) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_day",
+        "dayOfWeek must be 0-6 for weekly schedules",
+      );
+    }
+    resolvedDay = dayOfWeek;
+  }
+
+  try {
+    const schedule = await updateSiteSchedule(siteId, {
+      scheduleEnabled: enabled,
+      scheduleFrequency: frequencyValue,
+      scheduleTimeUtc: timeUtc,
+      scheduleDayOfWeek: resolvedDay,
+    });
+    res.json({ siteId, ...schedule });
+  } catch (err: unknown) {
+    console.error("Error in PUT /sites/:siteId/schedule", err);
+    sendInternalError(res, "Failed to update schedule", err);
+  }
+});
+
+app.get("/sites/:siteId/notifications", async (req, res) => {
+  const siteId = req.params.siteId;
+  try {
+    const settings = await getSiteNotificationSettings(siteId);
+    if (!settings) {
+      return sendApiError(res, 404, "site_not_found", "Site not found");
+    }
+    res.json({ siteId, ...settings });
+  } catch (err: unknown) {
+    console.error("Error in GET /sites/:siteId/notifications", err);
+    sendInternalError(res, "Failed to fetch notifications", err);
+  }
+});
+
+app.put("/sites/:siteId/notifications", async (req, res) => {
+  const siteId = req.params.siteId;
+  const { enabled, email, onlyOnChange, includeBroken, includeBlocked } =
+    req.body ?? {};
+
+  if (typeof enabled !== "boolean") {
+    return sendApiError(res, 400, "invalid_enabled", "enabled must be boolean");
+  }
+  if (email != null && typeof email !== "string") {
+    return sendApiError(res, 400, "invalid_email", "email must be a string");
+  }
+  if (email && !isValidEmail(email)) {
+    return sendApiError(res, 400, "invalid_email", "email is invalid");
+  }
+  if (typeof onlyOnChange !== "boolean") {
+    return sendApiError(
+      res,
+      400,
+      "invalid_only_on_change",
+      "onlyOnChange must be boolean",
+    );
+  }
+  if (typeof includeBroken !== "boolean") {
+    return sendApiError(
+      res,
+      400,
+      "invalid_include_broken",
+      "includeBroken must be boolean",
+    );
+  }
+  if (typeof includeBlocked !== "boolean") {
+    return sendApiError(
+      res,
+      400,
+      "invalid_include_blocked",
+      "includeBlocked must be boolean",
+    );
+  }
+
+  try {
+    const existing = await getSiteNotificationSettings(siteId);
+    if (!existing) {
+      return sendApiError(res, 404, "site_not_found", "Site not found");
+    }
+    const updated = await updateSiteNotificationSettings(siteId, {
+      notifyEnabled: enabled,
+      notifyEmail: email ?? null,
+      notifyOnlyOnChange: onlyOnChange,
+      notifyIncludeBlocked: includeBlocked,
+      notifyIncludeBroken: includeBroken,
+      lastNotifiedScanRunId: existing.lastNotifiedScanRunId,
+    });
+    res.json({ siteId, ...updated });
+  } catch (err: unknown) {
+    console.error("Error in PUT /sites/:siteId/notifications", err);
+    sendInternalError(res, "Failed to update notifications", err);
+  }
+});
+
+app.post("/sites/:siteId/notifications/test", async (req, res) => {
+  const siteId = req.params.siteId;
+  try {
+    const settings = await getSiteNotificationSettings(siteId);
+    if (!settings) {
+      return sendApiError(res, 404, "site_not_found", "Site not found");
+    }
+    const target = EMAIL_TEST_TO || settings.notifyEmail;
+    if (!target) {
+      return sendApiError(
+        res,
+        400,
+        "missing_email",
+        "notify_email is required",
+      );
+    }
+    await sendTestEmail(siteId, target);
+    res.json({ ok: true });
+  } catch (err: unknown) {
+    console.error("Error in POST /sites/:siteId/notifications/test", err);
+    sendInternalError(res, "Failed to send test email", err);
+  }
+});
+
+app.post("/scan-runs/:scanRunId/notify", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  try {
+    const run = await getScanRunById(scanRunId);
+    if (!run) {
+      return sendApiError(res, 404, "scan_run_not_found", "Scan run not found");
+    }
+    await notifyIfNeeded(scanRunId);
+    res.json({ ok: true, status: run.status });
+  } catch (err: unknown) {
+    console.error("Error in POST /scan-runs/:scanRunId/notify", err);
+    sendInternalError(res, "Failed to notify", err);
   }
 });
 
@@ -353,11 +586,46 @@ app.get("/scan-runs/:scanRunId/report", async (req, res) => {
 app.post("/scan-runs/:scanRunId/cancel", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   try {
+    const job = await getJobForScanRun(scanRunId);
+    if (job && job.status !== "completed") {
+      await cancelScanJob(job.id);
+    }
     await cancelScanRun(scanRunId);
-    return res.json({ ok: true });
+    return res.json({ ok: true, status: "cancelled" });
   } catch (err: unknown) {
     console.error("Error in POST /scan-runs/:scanRunId/cancel", err);
     return sendInternalError(res, "Failed to cancel scan run", err);
+  }
+});
+
+app.post("/scan-runs/:scanRunId/retry", async (req, res) => {
+  const scanRunId = req.params.scanRunId;
+  try {
+    const run = await getScanRunById(scanRunId);
+    if (!run) {
+      return sendApiError(res, 404, "scan_run_not_found", "Scan run not found");
+    }
+    if (run.status !== "failed" && run.status !== "cancelled") {
+      return sendApiError(
+        res,
+        400,
+        "scan_run_not_retryable",
+        "Scan run must be failed or cancelled to retry",
+      );
+    }
+    const jobId = await enqueueScanJob({
+      scanRunId,
+      siteId: run.site_id,
+      priority: 1,
+    });
+    await setScanRunStatus(scanRunId, "queued", {
+      errorMessage: null,
+      clearFinishedAt: true,
+    });
+    return res.json({ scanRunId, jobId, status: "queued" });
+  } catch (err: unknown) {
+    console.error("Error in POST /scan-runs/:scanRunId/retry", err);
+    return sendInternalError(res, "Failed to retry scan run", err);
   }
 });
 
@@ -395,22 +663,14 @@ app.post("/sites/:siteId/scans", async (req, res) => {
   }
 
   try {
-    // Get the scanRunId synchronously (from createScanRun)
-    const { getScanRunIdOnly } =
-      await import("../../../packages/crawler/src/scanService.js");
-    const scanRunId = await getScanRunIdOnly(siteId, body.startUrl);
+    const scanRunId = await createScanRun(siteId, body.startUrl);
+    const jobId = await enqueueScanJob({ scanRunId, siteId });
 
-    // Return immediately with the scanRunId
     res.status(201).json({
       scanRunId,
+      jobId,
       siteId,
       startUrl: body.startUrl,
-    });
-
-    // Run the scan in the background (fire-and-forget) with the same scanRunId
-    // The frontend will poll /scan-runs/:scanRunId or use SSE for progress
-    runScanForSite(siteId, body.startUrl, scanRunId).catch((err) => {
-      console.error("Background scan error for site", siteId, ":", err);
     });
   } catch (err: unknown) {
     console.error("Error in POST /sites/:siteId/scans", err);
@@ -504,6 +764,13 @@ app.get("/scan-runs/:scanRunId/links/export.csv", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   const classificationRaw = req.query.classification;
   const limitRaw = req.query.limit;
+  const statusGroupRaw = req.query.statusGroup;
+  const statusFiltersRaw = req.query.statusFilters;
+  const searchRaw = req.query.search;
+  const minOccurrencesRaw = req.query.minOccurrencesOnly;
+  const sortRaw = req.query.sort;
+  const showIgnoredRaw = req.query.showIgnored;
+  const ignoredOnlyRaw = req.query.ignoredOnly;
   const classification = parseExportClassification(classificationRaw);
   const limit = typeof limitRaw === "string" ? Number(limitRaw) : 5000;
   if (
@@ -529,7 +796,34 @@ app.get("/scan-runs/:scanRunId/links/export.csv", async (req, res) => {
 
   try {
     await applyIgnoreRulesForScanRun(scanRunId);
-    const rows = await getScanLinksForExport(scanRunId, classification, limit);
+    const statusGroup = parseStatusGroup(statusGroupRaw);
+    const statusFilters = parseStatusFilters(statusFiltersRaw);
+    const searchQuery = typeof searchRaw === "string" ? searchRaw.trim() : "";
+    const minOccurrencesOnly = minOccurrencesRaw === "true";
+    const sortOption = parseSortOption(sortRaw);
+    const showIgnored = showIgnoredRaw === "true";
+    const ignoredOnly = ignoredOnlyRaw === "true";
+    const useFiltered =
+      statusGroupRaw ||
+      statusFiltersRaw ||
+      searchQuery ||
+      minOccurrencesRaw ||
+      sortRaw ||
+      showIgnoredRaw ||
+      ignoredOnlyRaw;
+    const rows = useFiltered
+      ? await getScanLinksForExportFiltered(scanRunId, {
+          classification,
+          statusGroup,
+          statusFilters,
+          searchQuery,
+          minOccurrencesOnly,
+          sortOption,
+          showIgnored,
+          ignoredOnly,
+          limit,
+        })
+      : await getScanLinksForExport(scanRunId, classification, limit);
     const dateStamp = new Date().toISOString().split("T")[0];
     const filename = `scan-links-${scanRunId}-${classification}-${dateStamp}.csv`;
     const header = [
@@ -576,6 +870,13 @@ app.get("/scan-runs/:scanRunId/links/export.json", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   const classificationRaw = req.query.classification;
   const limitRaw = req.query.limit;
+  const statusGroupRaw = req.query.statusGroup;
+  const statusFiltersRaw = req.query.statusFilters;
+  const searchRaw = req.query.search;
+  const minOccurrencesRaw = req.query.minOccurrencesOnly;
+  const sortRaw = req.query.sort;
+  const showIgnoredRaw = req.query.showIgnored;
+  const ignoredOnlyRaw = req.query.ignoredOnly;
   const classification = parseExportClassification(classificationRaw);
   const limit = typeof limitRaw === "string" ? Number(limitRaw) : 5000;
   if (
@@ -601,7 +902,34 @@ app.get("/scan-runs/:scanRunId/links/export.json", async (req, res) => {
 
   try {
     await applyIgnoreRulesForScanRun(scanRunId);
-    const rows = await getScanLinksForExport(scanRunId, classification, limit);
+    const statusGroup = parseStatusGroup(statusGroupRaw);
+    const statusFilters = parseStatusFilters(statusFiltersRaw);
+    const searchQuery = typeof searchRaw === "string" ? searchRaw.trim() : "";
+    const minOccurrencesOnly = minOccurrencesRaw === "true";
+    const sortOption = parseSortOption(sortRaw);
+    const showIgnored = showIgnoredRaw === "true";
+    const ignoredOnly = ignoredOnlyRaw === "true";
+    const useFiltered =
+      statusGroupRaw ||
+      statusFiltersRaw ||
+      searchQuery ||
+      minOccurrencesRaw ||
+      sortRaw ||
+      showIgnoredRaw ||
+      ignoredOnlyRaw;
+    const rows = useFiltered
+      ? await getScanLinksForExportFiltered(scanRunId, {
+          classification,
+          statusGroup,
+          statusFilters,
+          searchQuery,
+          minOccurrencesOnly,
+          sortOption,
+          showIgnored,
+          ignoredOnly,
+          limit,
+        })
+      : await getScanLinksForExport(scanRunId, classification, limit);
     const dateStamp = new Date().toISOString().split("T")[0];
     const filename = `scan-links-${scanRunId}-${classification}-${dateStamp}.json`;
     const payload = rows.map((row) => ({
@@ -995,6 +1323,79 @@ app.get("/scan-links/:scanLinkId/occurrences", async (req, res) => {
   } catch (err: unknown) {
     console.error("Error in GET /scan-links/:scanLinkId/occurrences", err);
     return sendInternalError(res, "Failed to fetch scan link occurrences", err);
+  }
+});
+
+app.post("/scan-links/:scanLinkId/recheck", async (req, res) => {
+  const scanLinkId = req.params.scanLinkId;
+  try {
+    const link = await getScanLinkById(scanLinkId);
+    if (!link) {
+      return sendApiError(
+        res,
+        404,
+        "scan_link_not_found",
+        "Scan link not found",
+      );
+    }
+    if (link.ignored) {
+      return sendApiError(
+        res,
+        400,
+        "scan_link_ignored",
+        "Ignored links cannot be rechecked",
+      );
+    }
+
+    const result = await validateLink(link.link_url);
+    const statusCode = result.ok ? result.status : result.status;
+    const classification = classifyStatus(
+      link.link_url,
+      statusCode ?? undefined,
+    );
+    const errorMessage = result.ok ? null : result.error;
+
+    const updated = await updateScanLinkAfterRecheck({
+      scanLinkId,
+      classification,
+      statusCode,
+      errorMessage,
+    });
+    if (!updated) {
+      return sendApiError(
+        res,
+        500,
+        "scan_link_update_failed",
+        "Failed to update scan link",
+      );
+    }
+    const serialized = {
+      ...updated,
+      first_seen_at:
+        updated.first_seen_at instanceof Date
+          ? updated.first_seen_at.toISOString()
+          : updated.first_seen_at,
+      last_seen_at:
+        updated.last_seen_at instanceof Date
+          ? updated.last_seen_at.toISOString()
+          : updated.last_seen_at,
+      created_at:
+        updated.created_at instanceof Date
+          ? updated.created_at.toISOString()
+          : updated.created_at,
+      updated_at:
+        updated.updated_at instanceof Date
+          ? updated.updated_at.toISOString()
+          : updated.updated_at,
+      ignored_at:
+        updated.ignored_at instanceof Date
+          ? updated.ignored_at.toISOString()
+          : updated.ignored_at,
+    };
+    return res.json({ scanLink: serialized });
+  } catch (err: unknown) {
+    console.error("Error in POST /scan-links/:scanLinkId/recheck", err);
+    return sendInternalError(res, "Failed to recheck scan link", err);
   }
 });
 

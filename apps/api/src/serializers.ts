@@ -9,6 +9,7 @@ export type SerializedScanRun = {
   started_at: string;
   finished_at: string | null;
   updated_at: string | null;
+  error_message: string | null;
   start_url: string;
   total_links: number;
   checked_links: number;
@@ -32,6 +33,7 @@ export function serializeScanRun(run: ScanRunInput): SerializedScanRun {
       run.updated_at instanceof Date
         ? run.updated_at.toISOString()
         : run.updated_at,
+    error_message: run.error_message ?? null,
     start_url: run.start_url,
     total_links: run.total_links,
     checked_links: run.checked_links,

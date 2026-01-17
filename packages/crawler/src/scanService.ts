@@ -13,6 +13,7 @@ import {
   insertScanLinkOccurrence,
   insertScanResult,
   listIgnoreRules,
+  setScanRunStatus,
   touchScanRun,
   updateScanRunProgress,
   upsertIgnoredLink,
@@ -190,6 +191,8 @@ export async function runScanForSite(
   // Ensure the scan run exists before any background work starts.
   const actualScanRunId: string =
     scanRunId ?? (await createScanRun(siteId, startUrl));
+
+  await setScanRunStatus(actualScanRunId, "in_progress");
 
   const MAX_PAGES = 25;
   const MAX_DEPTH = 2;

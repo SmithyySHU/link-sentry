@@ -8,12 +8,15 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@link-sentry/crawler": "*",
     "@link-sentry/db": "*",
     "cors": "^2.8.5",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "nodemailer": "^6.9.14"
   },
   "devDependencies": {
     "@types/cors": "^2.8.19",
-    "@types/express": "^4.17.25"
+    "@types/express": "^4.17.25",
+    "@types/nodemailer": "^6.4.14"
   }
 }

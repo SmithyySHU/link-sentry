@@ -1,6 +1,11 @@
 import { ensureConnected } from "./client.js";
 
-export type ScanStatus = "in_progress" | "completed" | "failed" | "cancelled";
+export type ScanStatus =
+  | "queued"
+  | "in_progress"
+  | "completed"
+  | "failed"
+  | "cancelled";
 export type LinkClassification = "ok" | "broken" | "blocked" | "no_response";
 
 export interface ScanRunSummary {
@@ -15,6 +20,7 @@ export interface ScanRunRow {
   status: ScanStatus;
   started_at: Date;
   finished_at: Date | null;
+  error_message: string | null;
   updated_at: Date;
   start_url: string;
   total_links: number;
@@ -63,7 +69,7 @@ export async function createScanRun(
   const res = await client.query(
     `
     INSERT INTO scan_runs (site_id, start_url, status)
-    VALUES ($1, $2, 'in_progress')
+    VALUES ($1, $2, 'queued')
     RETURNING id
     `,
     [siteId, startUrl],
@@ -73,7 +79,7 @@ export async function createScanRun(
 
 export async function completeScanRun(
   scanRunId: string,
-  status: Exclude<ScanStatus, "in_progress">,
+  status: Exclude<ScanStatus, "in_progress" | "queued">,
   summary: ScanRunSummary,
 ): Promise<void> {
   const client = await ensureConnected();
@@ -85,6 +91,7 @@ export async function completeScanRun(
     SET status = $2,
         finished_at = NOW(),
         updated_at = NOW(),
+        error_message = NULL,
         total_links = $3,
         checked_links = $4,
         broken_links = $5
@@ -102,9 +109,44 @@ export async function cancelScanRun(scanRunId: string): Promise<void> {
       SET status = 'cancelled',
           finished_at = COALESCE(finished_at, NOW()),
           updated_at = NOW()
-      WHERE id = $1 AND status = 'in_progress'
+      WHERE id = $1 AND status IN ('queued', 'in_progress')
     `,
     [scanRunId],
+  );
+}
+
+export async function setScanRunStatus(
+  scanRunId: string,
+  status: ScanStatus,
+  options?: {
+    errorMessage?: string | null;
+    setFinishedAt?: boolean;
+    clearFinishedAt?: boolean;
+  },
+): Promise<void> {
+  const client = await ensureConnected();
+  const errorMessage =
+    typeof options?.errorMessage === "string" ? options.errorMessage : null;
+  const setFinishedAt = options?.setFinishedAt ?? false;
+  const clearFinishedAt = options?.clearFinishedAt ?? false;
+  await client.query(
+    `
+      UPDATE scan_runs
+      SET status = $2,
+          error_message = $3,
+          finished_at = CASE
+            WHEN $4 THEN NOW()
+            WHEN $5 THEN NULL
+            ELSE finished_at
+          END,
+          started_at = CASE
+            WHEN $2 = 'in_progress' THEN COALESCE(started_at, NOW())
+            ELSE started_at
+          END,
+          updated_at = NOW()
+      WHERE id = $1
+    `,
+    [scanRunId, status, errorMessage, setFinishedAt, clearFinishedAt],
   );
 }
 
@@ -138,6 +180,7 @@ export async function getLatestScanForSite(
       status,
       started_at,
       finished_at,
+      error_message,
       updated_at,
       start_url,
       total_links,

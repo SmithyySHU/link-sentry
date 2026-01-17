@@ -6,6 +6,18 @@ export interface DbSiteRow {
   user_id: string;
   url: string;
   created_at: Date;
+  schedule_enabled: boolean;
+  schedule_frequency: "daily" | "weekly";
+  schedule_time_utc: string;
+  schedule_day_of_week: number | null;
+  next_scheduled_at: Date | null;
+  last_scheduled_at: Date | null;
+  notify_enabled: boolean;
+  notify_email: string | null;
+  notify_only_on_change: boolean;
+  notify_include_blocked: boolean;
+  notify_include_broken: boolean;
+  last_notified_scan_run_id: string | null;
 }
 
 export async function getSitesForUser(userId: string): Promise<DbSiteRow[]> {
@@ -13,7 +25,22 @@ export async function getSitesForUser(userId: string): Promise<DbSiteRow[]> {
 
   const result = await db.query<DbSiteRow>(
     `
-    SELECT id, user_id, url, created_at
+    SELECT id,
+           user_id,
+           url,
+           created_at,
+           schedule_enabled,
+           schedule_frequency,
+           schedule_time_utc,
+           schedule_day_of_week,
+           next_scheduled_at,
+           last_scheduled_at,
+           notify_enabled,
+           notify_email,
+           notify_only_on_change,
+           notify_include_blocked,
+           notify_include_broken,
+           last_notified_scan_run_id
     FROM sites
     WHERE user_id = $1
     ORDER BY created_at DESC
@@ -29,7 +56,22 @@ export async function getAllSites(): Promise<DbSiteRow[]> {
 
   const result = await db.query<DbSiteRow>(
     `
-    SELECT id, user_id, url, created_at
+    SELECT id,
+           user_id,
+           url,
+           created_at,
+           schedule_enabled,
+           schedule_frequency,
+           schedule_time_utc,
+           schedule_day_of_week,
+           next_scheduled_at,
+           last_scheduled_at,
+           notify_enabled,
+           notify_email,
+           notify_only_on_change,
+           notify_include_blocked,
+           notify_include_broken,
+           last_notified_scan_run_id
     FROM sites
     ORDER BY created_at DESC
     `,
@@ -43,7 +85,22 @@ export async function getSiteById(id: string): Promise<DbSiteRow | null> {
 
   const result = await db.query<DbSiteRow>(
     `
-    SELECT id, user_id, url, created_at
+    SELECT id,
+           user_id,
+           url,
+           created_at,
+           schedule_enabled,
+           schedule_frequency,
+           schedule_time_utc,
+           schedule_day_of_week,
+           next_scheduled_at,
+           last_scheduled_at,
+           notify_enabled,
+           notify_email,
+           notify_only_on_change,
+           notify_include_blocked,
+           notify_include_broken,
+           last_notified_scan_run_id
     FROM sites
     WHERE id = $1
     `,
@@ -68,7 +125,22 @@ export async function createSite(
     `
     INSERT INTO sites (user_id, url)
     VALUES ($1, $2)
-    RETURNING id, user_id, url, created_at
+    RETURNING id,
+              user_id,
+              url,
+              created_at,
+              schedule_enabled,
+              schedule_frequency,
+              schedule_time_utc,
+              schedule_day_of_week,
+              next_scheduled_at,
+              last_scheduled_at,
+              notify_enabled,
+              notify_email,
+              notify_only_on_change,
+              notify_include_blocked,
+              notify_include_broken,
+              last_notified_scan_run_id
     `,
     [finalUserId, url.trim()],
   );

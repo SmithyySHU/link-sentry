@@ -47,7 +47,11 @@ export function mountScanRunEvents(app: Application) {
           send("scan_run", serialized);
         }
 
-        if (run.status !== "in_progress") {
+        if (
+          run.status === "completed" ||
+          run.status === "failed" ||
+          run.status === "cancelled"
+        ) {
           send("scan_run", serialized);
           send("done", { status: run.status, scanRunId: run.id });
           res.end();

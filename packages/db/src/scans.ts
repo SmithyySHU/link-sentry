@@ -1,6 +1,11 @@
 import { ensureConnected } from "./client.js";
 
-export type ScanStatus = "in_progress" | "completed" | "failed" | "cancelled";
+export type ScanStatus =
+  | "queued"
+  | "in_progress"
+  | "completed"
+  | "failed"
+  | "cancelled";
 
 export interface ScanRunRow {
   id: string;
@@ -8,6 +13,7 @@ export interface ScanRunRow {
   status: ScanStatus;
   started_at: Date;
   finished_at: Date | null;
+  error_message: string | null;
   updated_at: Date;
   start_url: string;
   total_links: number;
@@ -28,6 +34,7 @@ export async function getLatestScanForSite(
         status,
         started_at,
         finished_at,
+        error_message,
         updated_at,
         start_url,
         total_links,
@@ -62,6 +69,7 @@ export async function getRecentScansForSite(
         status,
         started_at,
         finished_at,
+        error_message,
         updated_at,
         start_url,
         total_links,
@@ -91,6 +99,7 @@ export async function getScanRunById(
         status,
         started_at,
         finished_at,
+        error_message,
         updated_at,
         start_url,
         total_links,

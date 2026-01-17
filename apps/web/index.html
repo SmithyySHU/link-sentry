@@ -4,18 +4,27 @@
     <meta charset="UTF-8" />
     <title>Link-Sentry Dashboard (dev)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script>
+      (function () {
+        try {
+          var stored = localStorage.getItem("theme");
+          var prefersDark =
+            window.matchMedia &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches;
+          var mode =
+            stored === "dark" || stored === "light"
+              ? stored
+              : prefersDark
+                ? "dark"
+                : "light";
+          document.documentElement.dataset.theme = mode;
+        } catch (e) {
+          document.documentElement.dataset.theme = "dark";
+        }
+      })();
+    </script>
   </head>
-  <body
-    style="
-      margin: 0;
-      font-family:
-        system-ui,
-        -apple-system,
-        BlinkMacSystemFont,
-        &quot;Segoe UI&quot;,
-        sans-serif;
-    "
-  >
+  <body style="margin: 0">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

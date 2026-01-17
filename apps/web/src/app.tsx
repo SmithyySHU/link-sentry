@@ -1,7 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { ScanProgressBar } from "./components/ScanProgressBar";
 
-type ScanStatus = "in_progress" | "completed" | "failed" | "cancelled";
+type ScanStatus =
+  | "queued"
+  | "in_progress"
+  | "completed"
+  | "failed"
+  | "cancelled";
 type LinkClassification = "ok" | "broken" | "blocked" | "no_response";
 type StatusGroup = "all" | "no_response" | "http_error";
 type ThemeMode = "dark" | "light";
@@ -25,6 +30,18 @@ interface Site {
   user_id: string;
   url: string;
   created_at: string;
+  schedule_enabled: boolean;
+  schedule_frequency: "daily" | "weekly";
+  schedule_time_utc: string;
+  schedule_day_of_week: number | null;
+  next_scheduled_at: string | null;
+  last_scheduled_at: string | null;
+  notify_enabled: boolean;
+  notify_email: string | null;
+  notify_only_on_change: boolean;
+  notify_include_blocked: boolean;
+  notify_include_broken: boolean;
+  last_notified_scan_run_id: string | null;
 }
 
 interface SitesResponse {
@@ -40,6 +57,7 @@ interface ScanRunSummary {
   started_at: string;
   finished_at: string | null;
   updated_at?: string | null;
+  error_message?: string | null;
   start_url: string;
   total_links: number;
   checked_links: number;
@@ -130,6 +148,10 @@ interface ScanLinksResponse {
   links: ScanLink[];
 }
 
+interface RecheckScanLinkResponse {
+  scanLink: ScanLink;
+}
+
 interface ReportLinkRow {
   link_url: string;
   classification: LinkClassification;
@@ -210,11 +232,10 @@ const THEME_STORAGE_KEY = "theme";
 const LINKS_PAGE_SIZE = 50;
 const OCCURRENCES_PAGE_SIZE = 50;
 const IGNORED_OCCURRENCES_LIMIT = 20;
-const DIFF_OCCURRENCES_LIMIT = 20;
 const PROGRESS_DISMISS_MS = 2000;
 
 function isInProgress(status: ScanStatus | string | null | undefined) {
-  return status === "in_progress";
+  return status === "in_progress" || status === "queued";
 }
 
 function formatDate(value: string | null) {
@@ -248,6 +269,21 @@ function formatRelative(value: string | null | undefined) {
   if (diffMin < 60) return `${diffMin}m ago`;
   const diffHr = Math.round(diffMin / 60);
   return `${diffHr}h ago`;
+}
+
+function normalizeTimeInput(value: string | null | undefined) {
+  if (!value) return "02:00";
+  if (value.length >= 5) return value.slice(0, 5);
+  return value;
+}
+
+function runStatusTone(status: string | null | undefined) {
+  if (!status) return "neutral";
+  if (status === "completed") return "success";
+  if (status === "failed" || status === "cancelled") return "danger";
+  if (status === "queued" || status === "in_progress" || status === "running")
+    return "warning";
+  return "neutral";
 }
 
 function formatDuration(
@@ -297,17 +333,75 @@ function statusTooltip(status: number | null) {
   return STATUS_TOOLTIPS[status] ?? "";
 }
 
-function statusCodeGroup(status: number | null) {
-  if (status == null) return "unknown";
-  if (status >= 500) return "5xx";
-  if (status === 404 || status === 410) return "404";
-  if (status === 401 || status === 403 || status === 429) return "401/403/429";
+function statusCodeGroup(
+  row: Pick<ScanLink, "status_code" | "classification">,
+) {
+  if (row.status_code == null) return "no_response";
+  if (row.status_code >= 500) return "5xx";
+  if (row.status_code === 404 || row.status_code === 410) return "404";
+  if (
+    row.status_code === 401 ||
+    row.status_code === 403 ||
+    row.status_code === 429
+  )
+    return "401/403/429";
   return "other";
 }
 
 function formatClassification(value: LinkClassification) {
-  if (value === "no_response") return "Timed out";
+  if (value === "no_response") return "No response";
   return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function getWhyDetails(row: ScanLink) {
+  const status = row.status_code;
+  if (status === 401 || status === 403 || status === 429) {
+    return {
+      title: "Why this happened",
+      body: [
+        "Access controls or bot protection blocked the request.",
+        "Try with authenticated headers or a different User-Agent.",
+        "Rate limiting can clear after a cooldown window.",
+      ],
+    };
+  }
+  if (status === 404 || status === 410) {
+    return {
+      title: "Why this happened",
+      body: [
+        "The resource no longer exists or moved.",
+        "Update the link to the new destination or remove it.",
+        "Consider adding a redirect if this is your content.",
+      ],
+    };
+  }
+  if (status == null || row.classification === "no_response") {
+    return {
+      title: "Why this happened",
+      body: [
+        "The server did not respond in time or failed the request.",
+        "DNS, TLS/cert, firewall, or network issues can cause timeouts.",
+        "Retry later or from a different region to confirm.",
+      ],
+    };
+  }
+  if (status >= 500) {
+    return {
+      title: "Why this happened",
+      body: [
+        "The server returned an error response.",
+        "Check server logs or retry to confirm this is transient.",
+        "Consider alerting the owner if it persists.",
+      ],
+    };
+  }
+  return {
+    title: "Why this happened",
+    body: [
+      "The response indicates this link needs attention.",
+      "Review the source page for context and intended behavior.",
+    ],
+  };
 }
 
 function getSystemTheme(): ThemeMode {
@@ -380,12 +474,14 @@ const App: React.FC = () => {
   const sseRef = useRef<EventSource | null>(null);
   const sseRunIdRef = useRef<string | null>(null);
   const sseRetryTimerRef = useRef<number | null>(null);
-  const copyTimersRef = useRef<Map<string, number>>(new Map());
   const runStatusRef = useRef<Map<string, ScanStatus>>(new Map());
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const filterDropdownRef = useRef<HTMLDivElement | null>(null);
   const sidebarRef = useRef<HTMLElement | null>(null);
   const hamburgerRef = useRef<HTMLButtonElement | null>(null);
+  const detailsDrawerRef = useRef<HTMLDivElement | null>(null);
+  const detailsCloseRef = useRef<HTMLButtonElement | null>(null);
+  const themeMenuRef = useRef<HTMLDivElement | null>(null);
   const progressDismissRef = useRef<number | null>(null);
   const lastRunStatusRef = useRef<{
     id: string | null;
@@ -482,7 +578,6 @@ const App: React.FC = () => {
   const [progressPhase, setProgressPhase] = useState<
     "hidden" | "running" | "completed"
   >("hidden");
-  const [copyFeedback, setCopyFeedback] = useState<Record<string, boolean>>({});
   const [themePreference, setThemePreference] =
     useState<ThemePreference>("system");
   const [themeMode, setThemeMode] = useState<ThemeMode>("dark");
@@ -503,16 +598,36 @@ const App: React.FC = () => {
       id: string;
       message: string;
       tone?: "success" | "warning" | "info";
+      action?: { label: string; onClick: () => void };
     }>
   >([]);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
-  const [expandedRowIds, setExpandedRowIds] = useState<Record<string, boolean>>(
-    {},
-  );
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [detailsLinkId, setDetailsLinkId] = useState<string | null>(null);
+  const [recheckLoadingId, setRecheckLoadingId] = useState<string | null>(null);
+  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const [addSiteOpen, setAddSiteOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [ignoreRulesOpen, setIgnoreRulesOpen] = useState(false);
   const [ignoreRules, setIgnoreRules] = useState<IgnoreRule[]>([]);
   const [ignoreRulesLoading, setIgnoreRulesLoading] = useState(false);
   const [ignoreRulesError, setIgnoreRulesError] = useState<string | null>(null);
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduleFrequency, setScheduleFrequency] = useState<
+    "daily" | "weekly"
+  >("weekly");
+  const [scheduleTimeUtc, setScheduleTimeUtc] = useState("02:00");
+  const [scheduleDayOfWeek, setScheduleDayOfWeek] = useState(1);
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [notifyEnabled, setNotifyEnabled] = useState(false);
+  const [notifyEmail, setNotifyEmail] = useState("");
+  const [notifyOnlyOnChange, setNotifyOnlyOnChange] = useState(true);
+  const [notifyIncludeBroken, setNotifyIncludeBroken] = useState(true);
+  const [notifyIncludeBlocked, setNotifyIncludeBlocked] = useState(true);
+  const [notifySaving, setNotifySaving] = useState(false);
+  const [notifyTestSending, setNotifyTestSending] = useState(false);
+  const [notifyError, setNotifyError] = useState<string | null>(null);
   const [newRuleType, setNewRuleType] =
     useState<IgnoreRule["rule_type"]>("domain");
   const [newRulePattern, setNewRulePattern] = useState("");
@@ -522,19 +637,6 @@ const App: React.FC = () => {
   const [diffLoading, setDiffLoading] = useState(false);
   const [diffError, setDiffError] = useState<string | null>(null);
   const [diffData, setDiffData] = useState<DiffResponse["diff"] | null>(null);
-  const [diffTab, setDiffTab] = useState<"added" | "removed" | "changed">(
-    "added",
-  );
-  const [diffOpen, setDiffOpen] = useState(false);
-  const [diffOccurrences, setDiffOccurrences] = useState<
-    Record<string, ScanLinkOccurrence[]>
-  >({});
-  const [diffOccLoading, setDiffOccLoading] = useState<Record<string, boolean>>(
-    {},
-  );
-  const [diffOccError, setDiffOccError] = useState<
-    Record<string, string | null>
-  >({});
   const [isNarrow, setIsNarrow] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
 
@@ -573,6 +675,18 @@ const App: React.FC = () => {
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
   }, [exportMenuOpen]);
+
+  useEffect(() => {
+    if (!themeMenuOpen) return;
+    const handleClick = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (themeMenuRef.current && !themeMenuRef.current.contains(target)) {
+        setThemeMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [themeMenuOpen]);
 
   const pinnedRunId = activeRunId ?? selectedRunId;
 
@@ -660,14 +774,14 @@ const App: React.FC = () => {
     );
 
     let next = source.filter((row) => {
-      if (statusGroup === "no_response" && row.status_code != null)
+      if (statusGroup === "no_response" && row.classification !== "no_response")
         return false;
       if (statusGroup === "http_error" && row.status_code == null) return false;
       if (query && !row.link_url.toLowerCase().includes(query)) return false;
       if (minOccurrencesOnly && row.occurrence_count <= 1) return false;
       if (
         activeStatusFilters.length > 0 &&
-        !activeStatusFilters.includes(statusCodeGroup(row.status_code))
+        !activeStatusFilters.includes(statusCodeGroup(row))
       )
         return false;
       return true;
@@ -720,7 +834,7 @@ const App: React.FC = () => {
     minOccurrencesOnly ||
     Object.values(statusFilters).some(Boolean);
   const exportDisabled = !selectedRunId;
-  const exportLinksDisabled = !selectedRunId || activeTab === "ignored";
+  const exportLinksDisabled = !selectedRunId;
 
   const filteredSites = useMemo(() => {
     const query = siteSearch.trim().toLowerCase();
@@ -729,6 +843,13 @@ const App: React.FC = () => {
   }, [sites, siteSearch]);
 
   const isSelectedRunInProgress = isInProgress(selectedRun?.status);
+  const isQueued = selectedRun?.status === "queued";
+  const isRunning = selectedRun?.status === "in_progress";
+  const canCancelRun = !!selectedRun && (isQueued || isRunning);
+  const canRetryRun =
+    !!selectedRun &&
+    (selectedRun.status === "failed" || selectedRun.status === "cancelled");
+  const canRescan = !!selectedRun && selectedRun.status === "completed";
   const showProgress = progressPhase !== "hidden" && !!selectedRun;
   const lastProgressAt = useMemo(() => {
     if (!selectedRun) return null;
@@ -755,7 +876,10 @@ const App: React.FC = () => {
     const isSameRun = prev.id === selectedRun.id;
     const prevStatus = isSameRun ? prev.status : null;
 
-    if (selectedRun.status === "in_progress") {
+    if (
+      selectedRun.status === "in_progress" ||
+      selectedRun.status === "queued"
+    ) {
       setProgressPhase("running");
     } else if (
       selectedRun.status === "completed" &&
@@ -880,12 +1004,6 @@ const App: React.FC = () => {
     (issueDiff.added.length > 0 ||
       issueDiff.removed.length > 0 ||
       issueDiff.changed.length > 0);
-  const diffItems = useMemo(() => {
-    if (!issueDiff) return [];
-    if (diffTab === "added") return issueDiff.added;
-    if (diffTab === "removed") return issueDiff.removed;
-    return issueDiff.changed;
-  }, [issueDiff, diffTab]);
   const reportView = viewMode === "report";
   const reportRun = reportData?.scanRun ?? null;
   const reportSite = reportRun
@@ -893,6 +1011,25 @@ const App: React.FC = () => {
       reportRun.site_id)
     : null;
   const reportSummary = reportData?.summary.byClassification ?? {};
+  const selectedLink = useMemo(
+    () => results.find((row) => row.id === detailsLinkId) ?? null,
+    [detailsLinkId, results],
+  );
+  const selectedSite = useMemo(
+    () => sites.find((site) => site.id === selectedSiteId) ?? null,
+    [sites, selectedSiteId],
+  );
+  const resultsTitleCount =
+    activeTab === "ignored" ? ignoredResults.length : filteredResults.length;
+  const latestRunId = history[0]?.id ?? null;
+  const isLatestRun = !!selectedRun && selectedRun.id === latestRunId;
+  const runHeadingText = selectedRun
+    ? selectedRun.status === "queued" || selectedRun.status === "in_progress"
+      ? "Current scan"
+      : isLatestRun
+        ? "Last run"
+        : "Selected run"
+    : "Run summary";
 
   function markRunProgress(runId: string) {
     setLastProgressAtByRunId((prev) => ({
@@ -1141,11 +1278,30 @@ const App: React.FC = () => {
         event.preventDefault();
         searchInputRef.current.focus();
       }
+      if (event.key === "n" && !isTyping) {
+        if (!triggeringScan && selectedSiteId) {
+          event.preventDefault();
+          void handleRunScan();
+        }
+      }
+      if (event.key === "a" && !isTyping) {
+        event.preventDefault();
+        setAddSiteOpen(true);
+      }
+      if (event.key === "?" && !isTyping) {
+        event.preventDefault();
+        setShortcutsOpen(true);
+      }
       if (event.key === "Escape") {
         setIsDrawerOpen(false);
+        setDetailsOpen(false);
+        setDetailsLinkId(null);
         setIgnoreRulesOpen(false);
         setHistoryOpen(false);
         setFiltersOpen(false);
+        setThemeMenuOpen(false);
+        setAddSiteOpen(false);
+        setShortcutsOpen(false);
       }
     };
     window.addEventListener("keydown", handleKey);
@@ -1186,16 +1342,47 @@ const App: React.FC = () => {
   }, [isDrawerOpen]);
 
   useEffect(() => {
-    const handleResize = () => setIsNarrow(window.innerWidth < 980);
+    const handleResize = () => setIsNarrow(window.innerWidth < 1360);
     handleResize();
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
   useEffect(() => {
+    if (detailsOpen && detailsLinkId && !selectedLink) {
+      setDetailsOpen(false);
+    }
+  }, [detailsLinkId, detailsOpen, selectedLink]);
+
+  useEffect(() => {
+    if (!detailsOpen) return;
+    detailsCloseRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const drawer = detailsDrawerRef.current;
+      if (!drawer) return;
+      const focusables = Array.from(
+        drawer.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((el) => !el.hasAttribute("disabled"));
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [detailsOpen]);
+
+  useEffect(() => {
     return () => {
-      copyTimersRef.current.forEach((timer) => window.clearTimeout(timer));
-      copyTimersRef.current.clear();
       stopSse();
       stopPolling();
     };
@@ -1658,6 +1845,11 @@ const App: React.FC = () => {
   }, [activeTab, selectedRunId]);
 
   useEffect(() => {
+    setDetailsOpen(false);
+    setDetailsLinkId(null);
+  }, [selectedRunId]);
+
+  useEffect(() => {
     if (!ignoreRulesOpen || !selectedSiteId) return;
     void loadIgnoreRules(selectedSiteId);
   }, [ignoreRulesOpen, selectedSiteId]);
@@ -1675,6 +1867,21 @@ const App: React.FC = () => {
   }, [selectedSiteId]);
 
   useEffect(() => {
+    if (!selectedSite) return;
+    setScheduleEnabled(selectedSite.schedule_enabled ?? false);
+    setScheduleFrequency(selectedSite.schedule_frequency ?? "weekly");
+    setScheduleTimeUtc(normalizeTimeInput(selectedSite.schedule_time_utc));
+    setScheduleDayOfWeek(selectedSite.schedule_day_of_week ?? 1);
+    setScheduleError(null);
+    setNotifyEnabled(selectedSite.notify_enabled ?? false);
+    setNotifyEmail(selectedSite.notify_email ?? "");
+    setNotifyOnlyOnChange(selectedSite.notify_only_on_change ?? true);
+    setNotifyIncludeBroken(selectedSite.notify_include_broken ?? true);
+    setNotifyIncludeBlocked(selectedSite.notify_include_blocked ?? true);
+    setNotifyError(null);
+  }, [selectedSite]);
+
+  useEffect(() => {
     if (!selectedRunId || history.length === 0) {
       setCompareRunId(null);
       setDiffData(null);
@@ -1688,10 +1895,6 @@ const App: React.FC = () => {
       setCompareRunId(null);
     }
   }, [history, selectedRunId]);
-
-  useEffect(() => {
-    setDiffOpen(false);
-  }, [compareRunId, selectedRunId]);
 
   useEffect(() => {
     if (!selectedRunId || !compareRunId) {
@@ -1750,6 +1953,8 @@ const App: React.FC = () => {
     stopPolling();
     stopSse();
     setIsDrawerOpen(false);
+    setDetailsOpen(false);
+    setDetailsLinkId(null);
 
     setActiveRunId(null);
     activeRunIdRef.current = null;
@@ -1821,6 +2026,8 @@ const App: React.FC = () => {
 
       setNewSiteUrl("");
       await loadSites();
+      setAddSiteOpen(false);
+      pushToast("Site added", "success");
     } catch (err: unknown) {
       setCreateError(getErrorMessage(err, "Failed to create site"));
     } finally {
@@ -1888,6 +2095,150 @@ const App: React.FC = () => {
     }
   }
 
+  async function handleSaveSchedule() {
+    if (!selectedSiteId) return;
+    setScheduleSaving(true);
+    setScheduleError(null);
+    try {
+      const res = await fetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/schedule`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            enabled: scheduleEnabled,
+            frequency: scheduleFrequency,
+            timeUtc: scheduleTimeUtc,
+            dayOfWeek:
+              scheduleFrequency === "weekly" ? scheduleDayOfWeek : null,
+          }),
+        },
+      );
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Schedule update failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+
+      const data = (await res.json()) as {
+        scheduleEnabled: boolean;
+        scheduleFrequency: "daily" | "weekly";
+        scheduleTimeUtc: string;
+        scheduleDayOfWeek: number | null;
+        nextScheduledAt: string | null;
+        lastScheduledAt: string | null;
+      };
+
+      setSites((prev) =>
+        prev.map((site) =>
+          site.id === selectedSiteId
+            ? {
+                ...site,
+                schedule_enabled: data.scheduleEnabled,
+                schedule_frequency: data.scheduleFrequency,
+                schedule_time_utc: data.scheduleTimeUtc,
+                schedule_day_of_week: data.scheduleDayOfWeek,
+                next_scheduled_at: data.nextScheduledAt,
+                last_scheduled_at: data.lastScheduledAt,
+              }
+            : site,
+        ),
+      );
+
+      pushToast("Schedule updated", "success");
+    } catch (err: unknown) {
+      setScheduleError(getErrorMessage(err, "Failed to update schedule"));
+    } finally {
+      setScheduleSaving(false);
+    }
+  }
+
+  async function handleSaveNotifications() {
+    if (!selectedSiteId) return;
+    setNotifySaving(true);
+    setNotifyError(null);
+    try {
+      const res = await fetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/notifications`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            enabled: notifyEnabled,
+            email: notifyEmail.trim() || null,
+            onlyOnChange: notifyOnlyOnChange,
+            includeBroken: notifyIncludeBroken,
+            includeBlocked: notifyIncludeBlocked,
+          }),
+        },
+      );
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Notifications update failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+
+      const data = (await res.json()) as {
+        notifyEnabled: boolean;
+        notifyEmail: string | null;
+        notifyOnlyOnChange: boolean;
+        notifyIncludeBlocked: boolean;
+        notifyIncludeBroken: boolean;
+        lastNotifiedScanRunId: string | null;
+      };
+
+      setSites((prev) =>
+        prev.map((site) =>
+          site.id === selectedSiteId
+            ? {
+                ...site,
+                notify_enabled: data.notifyEnabled,
+                notify_email: data.notifyEmail,
+                notify_only_on_change: data.notifyOnlyOnChange,
+                notify_include_blocked: data.notifyIncludeBlocked,
+                notify_include_broken: data.notifyIncludeBroken,
+                last_notified_scan_run_id: data.lastNotifiedScanRunId,
+              }
+            : site,
+        ),
+      );
+
+      pushToast("Notifications updated", "success");
+    } catch (err: unknown) {
+      setNotifyError(getErrorMessage(err, "Failed to update notifications"));
+    } finally {
+      setNotifySaving(false);
+    }
+  }
+
+  async function handleSendTestEmail() {
+    if (!selectedSiteId) return;
+    setNotifyTestSending(true);
+    setNotifyError(null);
+    try {
+      const res = await fetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/notifications/test`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Test email failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      pushToast("Test email sent", "success");
+    } catch (err: unknown) {
+      setNotifyError(getErrorMessage(err, "Failed to send test email"));
+      pushToast(getErrorMessage(err, "Failed to send test email"), "warning");
+    } finally {
+      setNotifyTestSending(false);
+    }
+  }
+
   async function fetchOccurrencesForLink(scanLinkId: string, offset: number) {
     setOccurrencesLoadingByLinkId((prev) => ({ ...prev, [scanLinkId]: true }));
     setOccurrencesErrorByLinkId((prev) => ({ ...prev, [scanLinkId]: null }));
@@ -1944,24 +2295,7 @@ const App: React.FC = () => {
     await fetchOccurrencesForLink(scanLinkId, offset);
   }
 
-  async function toggleExpandLink(scanLinkId: string) {
-    const nextExpanded = !expandedRowIds[scanLinkId];
-    setExpandedRowIds((prev) => ({ ...prev, [scanLinkId]: nextExpanded }));
-    if (nextExpanded && !occurrencesByLinkId[scanLinkId]) {
-      await fetchOccurrencesForLink(scanLinkId, 0);
-    }
-    if (nextExpanded) {
-      window.setTimeout(() => {
-        document.getElementById(`scan-link-${scanLinkId}`)?.scrollIntoView({
-          block: "nearest",
-          behavior: "smooth",
-        });
-      }, 0);
-    }
-  }
-
   function resetOccurrencesState() {
-    setExpandedRowIds({});
     setOccurrencesByLinkId({});
     setOccurrencesOffsetByLinkId({});
     setOccurrencesHasMoreByLinkId({});
@@ -1970,29 +2304,13 @@ const App: React.FC = () => {
     setOccurrencesErrorByLinkId({});
   }
 
-  function showCopyFeedback(key: string) {
-    setCopyFeedback((prev) => ({ ...prev, [key]: true }));
-    const existing = copyTimersRef.current.get(key);
-    if (existing) window.clearTimeout(existing);
-    const timer = window.setTimeout(() => {
-      setCopyFeedback((prev) => {
-        const next = { ...prev };
-        delete next[key];
-        return next;
-      });
-      copyTimersRef.current.delete(key);
-    }, 1200);
-    copyTimersRef.current.set(key, timer);
-  }
-
   async function copyToClipboard(
     text: string,
-    feedbackKey?: string,
+    _feedbackKey?: string,
     toastMessage = "Copied to clipboard",
   ) {
     try {
       await navigator.clipboard.writeText(text);
-      if (feedbackKey) showCopyFeedback(feedbackKey);
       pushToast(toastMessage, "success");
     } catch (err) {
       pushToast("Copy failed", "warning");
@@ -2039,7 +2357,22 @@ const App: React.FC = () => {
   ) {
     if (!selectedRunId) return;
     const classification = classificationOverride ?? getExportClassification();
-    const url = `${API_BASE}/scan-runs/${encodeURIComponent(selectedRunId)}/links/export.${format}?classification=${encodeURIComponent(classification)}`;
+    const params = new URLSearchParams({
+      classification,
+      statusGroup,
+      sort: sortOption,
+    });
+    if (activeTab === "ignored") params.set("ignoredOnly", "true");
+    if (showIgnored) params.set("showIgnored", "true");
+    if (searchQuery.trim()) params.set("search", searchQuery.trim());
+    if (minOccurrencesOnly) params.set("minOccurrencesOnly", "true");
+    const activeStatusFilters = Object.keys(statusFilters).filter(
+      (key) => statusFilters[key],
+    );
+    if (activeStatusFilters.length > 0) {
+      params.set("statusFilters", activeStatusFilters.join(","));
+    }
+    const url = `${API_BASE}/scan-runs/${encodeURIComponent(selectedRunId)}/links/export.${format}?${params.toString()}`;
     const a = document.createElement("a");
     a.href = url;
     a.download = "";
@@ -2051,12 +2384,68 @@ const App: React.FC = () => {
   }
 
   async function handleRetryScan() {
-    const retryUrl = selectedRun?.start_url ?? startUrl;
-    if (!selectedRun || !retryUrl.trim()) return;
-    setStartUrl(retryUrl);
-    setResults([]);
-    resetOccurrencesState();
-    await handleRunScanWithUrl(retryUrl);
+    if (!selectedRunId) return;
+    setTriggeringScan(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(selectedRunId)}/retry`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Retry failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      setResults([]);
+      resetOccurrencesState();
+      setActiveRunId(selectedRunId);
+      activeRunIdRef.current = selectedRunId;
+      setHistory((prev) =>
+        prev.map((run) =>
+          run.id === selectedRunId ? { ...run, status: "queued" } : run,
+        ),
+      );
+      startSse(selectedRunId);
+      pushToast("Scan queued", "info");
+    } catch (err: unknown) {
+      pushToast(getErrorMessage(err, "Failed to retry scan"), "warning");
+    } finally {
+      setTriggeringScan(false);
+    }
+  }
+
+  function updateScanLinkState(next: ScanLink) {
+    setResults((prev) => prev.map((row) => (row.id === next.id ? next : row)));
+  }
+
+  async function handleRecheckLink(row: ScanLink) {
+    if (row.ignored) {
+      pushToast("Ignored links cannot be rechecked", "warning");
+      return;
+    }
+    setRecheckLoadingId(row.id);
+    try {
+      const res = await fetch(
+        `${API_BASE}/scan-links/${encodeURIComponent(row.id)}/recheck`,
+        { method: "POST" },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Recheck failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      const data = (await res.json()) as RecheckScanLinkResponse;
+      if (data.scanLink) {
+        updateScanLinkState(data.scanLink);
+      }
+      pushToast("Link rechecked", "success");
+    } catch (err: unknown) {
+      pushToast(getErrorMessage(err, "Failed to recheck link"), "warning");
+    } finally {
+      setRecheckLoadingId(null);
+    }
   }
 
   async function handleIgnoreLink(
@@ -2070,11 +2459,6 @@ const App: React.FC = () => {
     if (!selectedRunId) return;
     try {
       setResults((prev) => prev.filter((item) => item.id !== row.id));
-      setExpandedRowIds((prev) => {
-        const copy = { ...prev };
-        delete copy[row.id];
-        return copy;
-      });
       setOccurrencesByLinkId((prev) => {
         const copy = { ...prev };
         delete copy[row.id];
@@ -2134,6 +2518,85 @@ const App: React.FC = () => {
     }
   }
 
+  async function handleIgnoreLinkWithUndo(row: ScanLink) {
+    if (!selectedRunId) return;
+    try {
+      setResults((prev) =>
+        prev.map((item) =>
+          item.id === row.id
+            ? {
+                ...item,
+                ignored: true,
+                ignored_source: "rule",
+                ignored_at: new Date().toISOString(),
+              }
+            : item,
+        ),
+      );
+      const res = await fetch(
+        `${API_BASE}/scan-runs/${encodeURIComponent(selectedRunId)}/scan-links/${encodeURIComponent(row.id)}/ignore`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ mode: "site_rule_exact" }),
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Ignore failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      const data = (await res.json()) as {
+        scanRunId: string;
+        link_url: string;
+        rule?: IgnoreRule;
+      };
+      await loadResults(selectedRunId);
+      pushToast("Link ignored", "info", {
+        label: "Undo",
+        onClick: () => {
+          void (async () => {
+            try {
+              if (data.rule?.id) {
+                const deleteRes = await fetch(
+                  `${API_BASE}/ignore-rules/${encodeURIComponent(data.rule.id)}`,
+                  { method: "DELETE" },
+                );
+                if (!deleteRes.ok) {
+                  throw new Error(`Undo failed: ${deleteRes.status}`);
+                }
+                await reapplyIgnoreRules(selectedRunId);
+              } else {
+                const unignoreRes = await fetch(
+                  `${API_BASE}/scan-runs/${encodeURIComponent(
+                    selectedRunId,
+                  )}/links/${encodeURIComponent(data.link_url)}/unignore`,
+                  { method: "POST" },
+                );
+                if (!unignoreRes.ok) {
+                  throw new Error(`Undo failed: ${unignoreRes.status}`);
+                }
+              }
+              await loadResults(selectedRunId);
+              pushToast("Ignore undone", "success");
+            } catch (err: unknown) {
+              pushToast(
+                getErrorMessage(err, "Failed to undo ignore"),
+                "warning",
+              );
+            }
+          })();
+        },
+      });
+    } catch (err: unknown) {
+      if (selectedRunId) {
+        await loadResults(selectedRunId);
+      }
+      pushToast(getErrorMessage(err, "Failed to ignore link"), "warning");
+    }
+  }
+
   async function loadIgnoreRules(siteId: string) {
     setIgnoreRulesLoading(true);
     setIgnoreRulesError(null);
@@ -2170,40 +2633,6 @@ const App: React.FC = () => {
       setDiffData(null);
     } finally {
       setDiffLoading(false);
-    }
-  }
-
-  async function toggleDiffOccurrences(runId: string, linkUrl: string) {
-    const key = `${runId}:${linkUrl}`;
-    if (diffOccurrences[key]) {
-      setDiffOccurrences((prev) => {
-        const copy = { ...prev };
-        delete copy[key];
-        return copy;
-      });
-      return;
-    }
-
-    setDiffOccLoading((prev) => ({ ...prev, [key]: true }));
-    setDiffOccError((prev) => ({ ...prev, [key]: null }));
-    try {
-      const res = await fetch(
-        `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/links/${encodeURIComponent(linkUrl)}/occurrences?limit=${DIFF_OCCURRENCES_LIMIT}&offset=0`,
-        { cache: "no-store" },
-      );
-      if (!res.ok) throw new Error(`Request failed: ${res.status}`);
-      const data: ScanLinkOccurrencesResponse = await res.json();
-      setDiffOccurrences((prev) => ({
-        ...prev,
-        [key]: data.occurrences ?? [],
-      }));
-    } catch (err: unknown) {
-      setDiffOccError((prev) => ({
-        ...prev,
-        [key]: getErrorMessage(err, "Failed to load occurrences"),
-      }));
-    } finally {
-      setDiffOccLoading((prev) => ({ ...prev, [key]: false }));
     }
   }
 
@@ -2351,7 +2780,7 @@ const App: React.FC = () => {
         const optimistic: ScanRunSummary = {
           id: scanRunId,
           site_id: selectedSiteId,
-          status: "in_progress",
+          status: "queued",
           started_at: new Date().toISOString(),
           finished_at: null,
           start_url: url,
@@ -2377,7 +2806,7 @@ const App: React.FC = () => {
 
         startSse(scanRunId);
         void refreshSelectedRun(scanRunId);
-        pushToast("Scan started", "info");
+        pushToast("Scan queued", "info");
       } else {
         await loadHistory(selectedSiteId, { preserveSelection: false });
       }
@@ -2401,12 +2830,14 @@ const App: React.FC = () => {
   function pushToast(
     message: string,
     tone: "success" | "warning" | "info" = "info",
+    action?: { label: string; onClick: () => void },
   ) {
     const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    setToasts((prev) => [...prev, { id, message, tone }]);
+    setToasts((prev) => [...prev, { id, message, tone, action }]);
+    const ttl = action ? 4500 : 2200;
     window.setTimeout(() => {
       setToasts((prev) => prev.filter((toast) => toast.id !== id));
-    }, 2200);
+    }, ttl);
   }
 
   function maybeNotifyRunStatus(run: ScanRunSummary) {
@@ -2421,14 +2852,65 @@ const App: React.FC = () => {
     setStatusFilters((prev) => ({ ...prev, [key]: !prev[key] }));
   }
 
+  async function createQuickIgnoreRule(
+    ruleType: IgnoreRule["rule_type"],
+    pattern: string,
+  ) {
+    if (!selectedSiteId) return;
+    try {
+      const res = await fetch(
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/ignore-rules`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            ruleType,
+            pattern,
+            scope: "site",
+          }),
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Create failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      await loadIgnoreRules(selectedSiteId);
+      if (selectedRunId) await reapplyIgnoreRules(selectedRunId);
+      if (selectedRunId) await loadResults(selectedRunId);
+      pushToast("Ignore rule applied", "success");
+    } catch (err: unknown) {
+      pushToast(
+        getErrorMessage(err, "Failed to create ignore rule"),
+        "warning",
+      );
+    }
+  }
+
+  function openDetails(row: ScanLink) {
+    setDetailsLinkId(row.id);
+    setDetailsOpen(true);
+    if (!occurrencesByLinkId[row.id]) {
+      void fetchOccurrencesForLink(row.id, 0);
+    }
+  }
+
+  function handleRowClick(
+    event: React.MouseEvent<HTMLDivElement>,
+    row: ScanLink,
+  ) {
+    const target = event.target as HTMLElement | null;
+    if (target?.closest("[data-no-drawer]")) return;
+    openDetails(row);
+  }
+
   type LinkRowTheme = {
     accent: string;
     border: string;
     copyBorder: string;
     copyColor: string;
     panelBg: string;
-    loadMoreBg: string;
-    loadMoreColor: string;
   };
 
   function renderLinkRows(
@@ -2437,17 +2919,8 @@ const App: React.FC = () => {
   ) {
     return rows.map((row) => {
       const theme = themeForRow(row);
-      const isExpanded = !!expandedRowIds[row.id];
-      const occurrences = occurrencesByLinkId[row.id] ?? [];
-      const occurrencesTotal =
-        occurrencesTotalByLinkId[row.id] ?? row.occurrence_count;
-      const occurrencesLoading = occurrencesLoadingByLinkId[row.id] ?? false;
-      const occurrencesError = occurrencesErrorByLinkId[row.id];
-      const occurrencesHasMore = occurrencesHasMoreByLinkId[row.id] ?? false;
       const linkCopyKey = `link:${row.id}`;
       const sourceCopyKey = `source:${row.id}`;
-      const firstSource = occurrences[0]?.source_page;
-      const canCopySource = !!firstSource;
       const host = safeHost(row.link_url);
       const statusChipBg =
         row.status_code == null
@@ -2467,467 +2940,168 @@ const App: React.FC = () => {
         <div
           id={`scan-link-${row.id}`}
           key={row.id}
-          className={`result-row ${isExpanded ? "expanded" : ""}`}
+          className="result-row"
           style={{
-            borderRadius: "10px",
-            border: `1px solid ${theme.border}`,
+            borderLeft: `3px solid ${theme.border}`,
             background: theme.panelBg,
-            display: "flex",
-            flexDirection: "column",
-            boxShadow: isExpanded ? "0 0 0 2px var(--accent)" : "none",
-            opacity: row.ignored ? 0.75 : 1,
+            boxShadow: row.ignored ? "none" : "var(--soft-shadow)",
+            opacity: row.ignored ? 0.7 : 1,
+          }}
+          onClick={(event) => handleRowClick(event, row)}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              openDetails(row);
+            }
           }}
         >
-          <div
-            style={{
-              padding: "8px 10px",
-              display: "flex",
-              gap: "8px",
-              alignItems: "flex-start",
-            }}
-          >
-            <button
-              onClick={() => toggleExpandLink(row.id)}
-              style={{
-                background: "transparent",
-                border: "none",
-                color: theme.accent,
-                cursor: "pointer",
-                padding: "0 4px",
-                fontSize: "16px",
-                lineHeight: "1.2",
-                marginTop: "2px",
-              }}
-              title={isExpanded ? "Collapse" : "Expand"}
-            >
-              {isExpanded ? "▼" : "▶"}
-            </button>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  flexWrap: "wrap",
-                  marginBottom: "6px",
-                }}
-              >
-                <span style={{ fontWeight: 600, fontSize: "13px" }}>
-                  {host}
-                </span>
-                <span
-                  style={{
-                    fontSize: "11px",
-                    padding: "2px 6px",
-                    borderRadius: "999px",
-                    background: statusChipBg,
-                    color: statusChipText,
-                    maxWidth: "100%",
-                  }}
-                  title={statusTooltip(row.status_code)}
-                >
-                  {row.status_code ?? "No HTTP response"}
-                </span>
-                <span
-                  style={{
-                    fontSize: "11px",
-                    padding: "2px 6px",
-                    borderRadius: "999px",
-                    background: "var(--chip-bg)",
-                    color: "var(--chip-text)",
-                    border: `1px solid ${theme.border}`,
-                    textTransform: "capitalize",
-                  }}
-                >
-                  {formatClassification(row.classification)}
-                </span>
-                {row.classification === "no_response" && row.error_message && (
-                  <span
-                    style={{
-                      fontSize: "11px",
-                      padding: "2px 6px",
-                      borderRadius: "999px",
-                      background: "var(--panel)",
-                      color: "var(--muted)",
-                      border: "1px solid var(--border)",
-                      maxWidth: "100%",
-                    }}
-                    title={row.error_message}
-                  >
-                    {row.error_message}
-                  </span>
-                )}
-                {row.ignored && (
-                  <span
-                    style={{
-                      fontSize: "11px",
-                      padding: "2px 6px",
-                      borderRadius: "999px",
-                      background: "var(--panel)",
-                      color: "var(--muted)",
-                      border: "1px dashed var(--border)",
-                    }}
-                  >
-                    Ignored
-                  </span>
-                )}
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "8px",
-                  minWidth: 0,
-                }}
-              >
-                <a
-                  href={row.link_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  title={row.link_url}
-                  style={{
-                    color: theme.accent,
-                    textDecoration: "underline",
-                    fontSize: "12px",
-                    flex: 1,
-                    minWidth: 0,
-                    maxWidth: "100%",
-                    overflowWrap: "anywhere",
-                    wordBreak: "break-word",
-                    whiteSpace: "normal",
-                  }}
-                >
-                  {row.link_url}
-                </a>
-                <div className="row-actions">
-                  <button
-                    onClick={() => copyToClipboard(row.link_url, linkCopyKey)}
-                    className="icon-button"
-                    style={{
-                      borderColor: theme.copyBorder,
-                      color: theme.copyColor,
-                    }}
-                    aria-label="Copy link"
-                    title="Copy link"
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      width="14"
-                      height="14"
-                      aria-hidden="true"
-                    >
-                      <rect
-                        x="9"
-                        y="9"
-                        width="10"
-                        height="10"
-                        rx="2"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                      <rect
-                        x="5"
-                        y="5"
-                        width="10"
-                        height="10"
-                        rx="2"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                    </svg>
-                  </button>
-                  <button
-                    onClick={() =>
-                      firstSource && copyToClipboard(firstSource, sourceCopyKey)
-                    }
-                    className="icon-button"
-                    style={{
-                      borderColor: theme.copyBorder,
-                      color: theme.copyColor,
-                    }}
-                    disabled={!canCopySource}
-                    aria-label="Copy source"
-                    title={
-                      canCopySource ? "Copy source page" : "Source not loaded"
-                    }
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      width="14"
-                      height="14"
-                      aria-hidden="true"
-                    >
-                      <path
-                        d="M4 6h10a2 2 0 0 1 2 2v10H6a2 2 0 0 1-2-2V6z"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                      <path
-                        d="M8 4h10a2 2 0 0 1 2 2v10"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                    </svg>
-                  </button>
-                  <button
-                    onClick={() =>
-                      window.open(row.link_url, "_blank", "noopener,noreferrer")
-                    }
-                    className="icon-button"
-                    style={{
-                      borderColor: theme.copyBorder,
-                      color: theme.copyColor,
-                    }}
-                    aria-label="Open link"
-                    title="Open link"
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      width="14"
-                      height="14"
-                      aria-hidden="true"
-                    >
-                      <path
-                        d="M9 5h10v10"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                      <path
-                        d="M19 5l-9 9"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                      <path
-                        d="M5 9v10h10"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                    </svg>
-                  </button>
-                  <button
-                    onClick={() => handleIgnoreLink(row, "site_rule_exact")}
-                    className="icon-button"
-                    style={{
-                      borderColor: theme.copyBorder,
-                      color: theme.copyColor,
-                    }}
-                    disabled={row.ignored}
-                    aria-label="Ignore link"
-                    title={row.ignored ? "Already ignored" : "Ignore link"}
-                  >
-                    <svg
-                      viewBox="0 0 24 24"
-                      width="14"
-                      height="14"
-                      aria-hidden="true"
-                    >
-                      <circle
-                        cx="12"
-                        cy="12"
-                        r="9"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                      <path
-                        d="M7 7l10 10"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="1.8"
-                      />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-              {row.error_message && (
-                <div
-                  style={{
-                    fontSize: "12px",
-                    color: "var(--muted)",
-                    marginTop: "4px",
-                    overflowWrap: "anywhere",
-                  }}
-                >
-                  {row.error_message}
-                </div>
-              )}
-              <div
-                style={{
-                  fontSize: "11px",
-                  color: "var(--muted)",
-                  marginTop: "2px",
-                }}
-              >
-                found on {row.occurrence_count}{" "}
-                {row.occurrence_count === 1 ? "page" : "pages"}
-              </div>
+          <div className="result-cell result-link">
+            <div className="result-host">{host}</div>
+            <div className="result-url" title={row.link_url}>
+              {row.link_url}
+            </div>
+            <div className="result-meta">
+              {row.error_message ? row.error_message : "Tap for details"}
             </div>
           </div>
-
-          {isExpanded && (
-            <div
-              className="expand-panel"
-              style={{
-                marginTop: "6px",
-                padding: "10px 12px",
-                borderTop: `1px solid ${theme.border}`,
-                background: "var(--panel)",
-                display: "flex",
-                flexDirection: "column",
-                gap: "8px",
-              }}
+          <div className="result-cell result-status">
+            <span
+              className="status-chip"
+              style={{ background: statusChipBg, color: statusChipText }}
+              title={statusTooltip(row.status_code)}
             >
-              <div style={{ fontSize: "11px", color: "var(--muted)" }}>
-                Seen on {occurrencesTotal}{" "}
-                {occurrencesTotal === 1 ? "page" : "pages"}
-              </div>
-              <div
-                style={{
-                  fontSize: "12px",
-                  color: "var(--muted)",
-                  overflowWrap: "anywhere",
-                }}
-              >
-                <a
-                  href={row.link_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{ color: "var(--text)", textDecoration: "underline" }}
-                >
-                  {row.link_url}
-                </a>{" "}
-                · status{" "}
-                <span title={statusTooltip(row.status_code)}>
-                  {row.status_code ?? "No HTTP response"}
-                </span>{" "}
-                {row.error_message ? `· ${row.error_message}` : ""}
-              </div>
-              {row.ignored && (
-                <div
-                  style={{
-                    fontSize: "11px",
-                    color: "var(--muted)",
-                    display: "flex",
-                    gap: "8px",
-                    alignItems: "center",
-                    flexWrap: "wrap",
-                  }}
-                >
-                  <span>
-                    {row.ignored_source === "rule"
-                      ? "Ignored by rule"
-                      : "Manually ignored"}
-                    {row.ignore_reason ? ` · ${row.ignore_reason}` : ""}
-                  </span>
-                  {row.ignored_source === "rule" && row.ignored_by_rule_id && (
-                    <button
-                      onClick={() => setIgnoreRulesOpen(true)}
-                      style={{
-                        padding: "2px 6px",
-                        borderRadius: "6px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        fontSize: "10px",
-                        cursor: "pointer",
-                      }}
-                    >
-                      Manage rules
-                    </button>
-                  )}
-                </div>
-              )}
-              {occurrencesLoading && occurrences.length === 0 && (
-                <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                  Loading occurrences...
-                </div>
-              )}
-              {occurrencesError && (
-                <div style={{ fontSize: "12px", color: "var(--warning)" }}>
-                  {occurrencesError}
-                </div>
-              )}
-              {occurrences.length > 0 && (
-                <div
-                  style={{
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "6px",
-                  }}
-                >
-                  {occurrences.map((occ) => (
-                    <div
-                      key={occ.id}
-                      style={{
-                        padding: "6px 8px",
-                        borderRadius: "8px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel-elev)",
-                        display: "flex",
-                        gap: "8px",
-                        alignItems: "center",
-                      }}
-                    >
-                      <a
-                        href={occ.source_page}
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{
-                          flex: 1,
-                          minWidth: 0,
-                          color: "var(--text)",
-                          textDecoration: "underline",
-                          overflowWrap: "anywhere",
-                          wordBreak: "break-word",
-                        }}
-                      >
-                        {occ.source_page}
-                      </a>
-                      <button
-                        onClick={() =>
-                          copyToClipboard(occ.source_page, `occ:${occ.id}`)
-                        }
-                        style={{
-                          padding: "2px 6px",
-                          borderRadius: "6px",
-                          border: "1px solid var(--border)",
-                          background: "var(--panel)",
-                          fontSize: "10px",
-                          cursor: "pointer",
-                        }}
-                      >
-                        {copyFeedback[`occ:${occ.id}`] ? "Copied!" : "Copy"}
-                      </button>
-                    </div>
-                  ))}
-                  {occurrencesHasMore && (
-                    <button
-                      onClick={() => handleLoadMoreOccurrences(row.id)}
-                      disabled={occurrencesLoading}
-                      style={{
-                        padding: "6px 10px",
-                        borderRadius: "8px",
-                        border: "1px solid var(--border)",
-                        background: "var(--panel)",
-                        cursor: occurrencesLoading ? "default" : "pointer",
-                        fontSize: "11px",
-                      }}
-                    >
-                      {occurrencesLoading
-                        ? "Loading..."
-                        : "Load more occurrences"}
-                    </button>
-                  )}
-                </div>
-              )}
+              {row.status_code ?? "No response"}
+            </span>
+            <span
+              className="status-chip subtle"
+              style={{ borderColor: theme.border }}
+            >
+              {formatClassification(row.classification)}
+            </span>
+            {row.ignored && <span className="status-chip subtle">Ignored</span>}
+          </div>
+          <div className="result-cell result-occ">
+            <div className="occ-count">{row.occurrence_count}</div>
+            <div className="occ-label">
+              {row.occurrence_count === 1 ? "occurrence" : "occurrences"}
             </div>
-          )}
+          </div>
+          <div className="result-cell result-actions row-actions">
+            <button
+              onClick={() => copyToClipboard(row.link_url, linkCopyKey)}
+              className="icon-button"
+              style={{
+                borderColor: theme.copyBorder,
+                color: theme.copyColor,
+              }}
+              data-no-drawer
+              aria-label="Copy link"
+              title="Copy link"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                aria-hidden="true"
+              >
+                <rect
+                  x="9"
+                  y="9"
+                  width="10"
+                  height="10"
+                  rx="2"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                />
+                <rect
+                  x="5"
+                  y="5"
+                  width="10"
+                  height="10"
+                  rx="2"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                />
+              </svg>
+            </button>
+            <button
+              onClick={() =>
+                window.open(row.link_url, "_blank", "noopener,noreferrer")
+              }
+              className="icon-button"
+              style={{
+                borderColor: theme.copyBorder,
+                color: theme.copyColor,
+              }}
+              data-no-drawer
+              aria-label="Open link"
+              title="Open link"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                aria-hidden="true"
+              >
+                <path
+                  d="M9 5h10v10"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                />
+                <path
+                  d="M19 5l-9 9"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                />
+                <path
+                  d="M5 9v10h10"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                />
+              </svg>
+            </button>
+            <button
+              onClick={() => handleIgnoreLink(row, "site_rule_exact")}
+              className="icon-button"
+              style={{
+                borderColor: theme.copyBorder,
+                color: theme.copyColor,
+              }}
+              data-no-drawer
+              disabled={row.ignored}
+              aria-label="Ignore link"
+              title={row.ignored ? "Already ignored" : "Ignore link"}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="14"
+                height="14"
+                aria-hidden="true"
+              >
+                <circle
+                  cx="12"
+                  cy="12"
+                  r="9"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                />
+                <path
+                  d="M7 7l10 10"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                />
+              </svg>
+            </button>
+          </div>
         </div>
       );
     });
@@ -2939,8 +3113,6 @@ const App: React.FC = () => {
     copyBorder: "var(--danger)",
     copyColor: "var(--danger)",
     panelBg: "var(--panel-elev)",
-    loadMoreBg: "var(--danger)",
-    loadMoreColor: "white",
   };
 
   const blockedTheme: LinkRowTheme = {
@@ -2949,8 +3121,6 @@ const App: React.FC = () => {
     copyBorder: "var(--warning)",
     copyColor: "var(--warning)",
     panelBg: "var(--panel-elev)",
-    loadMoreBg: "var(--warning)",
-    loadMoreColor: "white",
   };
 
   const okTheme: LinkRowTheme = {
@@ -2959,8 +3129,6 @@ const App: React.FC = () => {
     copyBorder: "var(--success)",
     copyColor: "var(--success)",
     panelBg: "var(--panel-elev)",
-    loadMoreBg: "var(--success)",
-    loadMoreColor: "white",
   };
 
   const noResponseTheme: LinkRowTheme = {
@@ -2969,9 +3137,25 @@ const App: React.FC = () => {
     copyBorder: "var(--border)",
     copyColor: "var(--muted)",
     panelBg: "var(--panel-elev)",
-    loadMoreBg: "var(--border)",
-    loadMoreColor: "var(--text)",
   };
+
+  const selectedOccurrences = useMemo(() => {
+    if (!selectedLink) return [];
+    return occurrencesByLinkId[selectedLink.id] ?? [];
+  }, [occurrencesByLinkId, selectedLink]);
+  const selectedOccurrencesTotal = selectedLink
+    ? (occurrencesTotalByLinkId[selectedLink.id] ??
+      selectedLink.occurrence_count)
+    : 0;
+  const selectedOccurrencesLoading = selectedLink
+    ? (occurrencesLoadingByLinkId[selectedLink.id] ?? false)
+    : false;
+  const selectedOccurrencesError = selectedLink
+    ? occurrencesErrorByLinkId[selectedLink.id]
+    : null;
+  const selectedOccurrencesHasMore = selectedLink
+    ? (occurrencesHasMoreByLinkId[selectedLink.id] ?? false)
+    : false;
 
   return (
     <div
@@ -2986,59 +3170,81 @@ const App: React.FC = () => {
       }}
     >
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Space+Grotesk:wght@400;500;600;700&display=swap');
         :root[data-theme="dark"] {
-          --bg: #0b1220;
-          --panel: #0f172a;
-          --panel-elev: #111827;
-          --text: #e5e7eb;
-          --muted: #9ca3af;
-          --border: #1f2937;
-          --accent: #60a5fa;
-          --danger: #ef4444;
-          --warning: #f59e0b;
-          --success: #22c55e;
-          --shadow: 0 12px 30px rgba(0, 0, 0, 0.28);
-          --chip-bg: #111827;
-          --chip-text: #e5e7eb;
+          --bg: #070b14;
+          --surface: #0f172a;
+          --surface-2: #111f3a;
+          --surface-3: #0b1224;
+          --border: rgba(148, 163, 184, 0.18);
+          --text: #e2e8f0;
+          --muted: #94a3b8;
+          --accent: #38bdf8;
+          --accent-2: #22d3ee;
+          --danger: #f87171;
+          --warning: #fbbf24;
+          --success: #34d399;
+          --shadow: 0 20px 60px rgba(2, 6, 23, 0.45);
+          --soft-shadow: 0 10px 30px rgba(2, 6, 23, 0.32);
+          --chip-bg: rgba(15, 23, 42, 0.9);
+          --chip-text: #e2e8f0;
           --ghost: #0b1220;
+          --surface-accent: rgba(56, 189, 248, 0.1);
         }
         :root[data-theme="light"] {
           --bg: #f8fafc;
-          --panel: #ffffff;
-          --panel-elev: #f1f5f9;
+          --surface: #ffffff;
+          --surface-2: #f1f5f9;
+          --surface-3: #eef2ff;
+          --border: rgba(15, 23, 42, 0.12);
           --text: #0f172a;
           --muted: #64748b;
-          --border: #e2e8f0;
           --accent: #2563eb;
+          --accent-2: #38bdf8;
           --danger: #dc2626;
           --warning: #d97706;
           --success: #16a34a;
-          --shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
-          --chip-bg: #f1f5f9;
+          --shadow: 0 16px 36px rgba(15, 23, 42, 0.12);
+          --soft-shadow: 0 8px 18px rgba(15, 23, 42, 0.08);
+          --chip-bg: rgba(241, 245, 249, 0.9);
           --chip-text: #0f172a;
           --ghost: #ffffff;
+          --surface-accent: rgba(37, 99, 235, 0.08);
         }
-        html, body, * {
-          transition: background-color 120ms ease, color 120ms ease, border-color 120ms ease;
+        :root {
+          --panel: var(--surface);
+          --panel-elev: var(--surface-2);
+          --panel-faint: var(--surface-3);
+          --font-body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+          --font-display: "Space Grotesk", "IBM Plex Sans", system-ui, sans-serif;
+        }
+        html, body {
+          margin: 0;
+          padding: 0;
+        }
+        * {
+          box-sizing: border-box;
         }
         .app-container {
-          max-width: 1240px;
+          max-width: 1400px;
           margin: 0 auto;
           display: flex;
           flex-direction: column;
           gap: 24px;
-          font-family: "Inter", system-ui, -apple-system, sans-serif;
+          font-family: var(--font-body);
+          min-height: calc(100vh - 48px);
         }
         .app-shell {
-          background: radial-gradient(1200px 400px at 10% -10%, rgba(59, 130, 246, 0.18), transparent 60%),
-            radial-gradient(800px 300px at 90% 0%, rgba(14, 165, 233, 0.12), transparent 60%),
+          background: radial-gradient(1200px 420px at 10% -20%, rgba(34, 211, 238, 0.2), transparent 60%),
+            radial-gradient(900px 340px at 90% -10%, rgba(59, 130, 246, 0.18), transparent 60%),
             var(--bg);
         }
         .shell {
           display: flex;
           gap: 16px;
           align-items: stretch;
+          min-height: 0;
+          flex: 1;
         }
         .top-nav {
           position: sticky;
@@ -3050,7 +3256,7 @@ const App: React.FC = () => {
           gap: 16px;
           padding: 12px 16px;
           border: 1px solid var(--border);
-          border-radius: 14px;
+          border-radius: 16px;
           background: var(--panel);
           box-shadow: var(--shadow);
         }
@@ -3100,6 +3306,19 @@ const App: React.FC = () => {
           display: flex;
           flex-direction: column;
           gap: 16px;
+          height: calc(100dvh - 90px);
+          overflow: hidden;
+          min-height: 0;
+        }
+        .sidebar-content {
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+          flex: 1;
+          min-height: 0;
+          overflow-y: auto;
+          overflow-x: hidden;
+          padding-right: 4px;
         }
         .main {
           flex: 1;
@@ -3107,6 +3326,8 @@ const App: React.FC = () => {
           display: flex;
           flex-direction: column;
           gap: 16px;
+          min-height: 0;
+          height: 100%;
         }
         .resizer {
           width: 6px;
@@ -3120,24 +3341,197 @@ const App: React.FC = () => {
           grid-template-columns: 1fr;
           gap: 16px;
         }
+        .results-title {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 8px 4px;
+          color: var(--text);
+        }
+        .results-title__label {
+          font-family: var(--font-display);
+          font-size: 14px;
+          font-weight: 600;
+          letter-spacing: 0.02em;
+        }
+        .results-title__meta {
+          margin-top: 4px;
+          font-size: 11px;
+          color: var(--muted);
+        }
+        .results-table {
+          border-radius: 16px;
+          border: 1px solid var(--border);
+          background: var(--panel);
+          overflow: hidden;
+          box-shadow: var(--soft-shadow);
+        }
+        .results-footer-space {
+          height: 16px;
+        }
+        .results-header {
+          position: sticky;
+          top: 0;
+          z-index: 5;
+          display: grid;
+          grid-template-columns: minmax(0, 1.4fr) minmax(160px, 0.6fr) 100px 140px;
+          gap: 12px;
+          padding: 12px 16px;
+          background: linear-gradient(90deg, var(--surface), var(--surface-2));
+          border-bottom: 1px solid var(--border);
+          font-size: 11px;
+          letter-spacing: 0.08em;
+          text-transform: uppercase;
+          color: var(--muted);
+          white-space: nowrap;
+        }
+        .results-header div:nth-child(3) {
+          text-align: center;
+        }
+        .results-header div:last-child {
+          text-align: right;
+        }
+        .results-header.single {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        .results-scroll {
+          max-height: 560px;
+          display: flex;
+          flex-direction: column;
+          gap: 0;
+          overflow: auto;
+          background: var(--panel);
+        }
         .result-row {
-          transition: transform 140ms ease, box-shadow 140ms ease;
+          display: grid;
+          grid-template-columns: minmax(0, 1.4fr) minmax(160px, 0.6fr) 100px 140px;
+          gap: 12px;
+          padding: 14px 16px;
+          border-bottom: 1px solid var(--border);
+          transition: transform 140ms ease, box-shadow 140ms ease, background 140ms ease;
           position: relative;
           overflow: visible;
+          cursor: pointer;
+          align-items: center;
         }
         .result-row:hover {
           transform: translateY(-2px);
+          background: var(--surface-accent);
         }
-        .result-row.expanded,
-        .result-row.expanded:hover {
-          transform: none;
-          z-index: 2;
+        .result-row:last-child {
+          border-bottom: none;
+        }
+        .ignored-row {
+          display: flex;
+          border-bottom: none;
+        }
+        .result-cell {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          min-width: 0;
+        }
+        .result-link {
+          align-items: flex-start;
+        }
+        .result-actions {
+          align-items: center;
+          justify-content: flex-end;
+          width: 100%;
+        }
+        .result-host {
+          font-family: var(--font-display);
+          font-size: 13px;
+          font-weight: 600;
+          color: var(--text);
+        }
+        .result-url {
+          font-size: 12px;
+          color: var(--accent);
+          overflow: hidden;
+          display: -webkit-box;
+          -webkit-line-clamp: 2;
+          -webkit-box-orient: vertical;
+          word-break: break-word;
+        }
+        .result-meta {
+          font-size: 11px;
+          color: var(--muted);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .result-status {
+          align-items: flex-start;
+        }
+        .status-chip {
+          font-size: 11px;
+          padding: 3px 8px;
+          border-radius: 999px;
+          font-weight: 600;
+          color: white;
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+          border: 1px solid transparent;
+        }
+        .status-chip.subtle {
+          background: var(--chip-bg);
+          color: var(--chip-text);
+          border-color: var(--border);
+          font-weight: 500;
+        }
+        .status-chip.run-status {
+          background: rgba(148, 163, 184, 0.2);
+          color: var(--text);
+          border-color: rgba(148, 163, 184, 0.35);
+          font-weight: 600;
+          text-transform: capitalize;
+        }
+        .status-chip.run-status.success {
+          background: rgba(34, 197, 94, 0.18);
+          color: var(--success);
+          border-color: rgba(34, 197, 94, 0.45);
+        }
+        .status-chip.run-status.warning {
+          background: rgba(245, 158, 11, 0.2);
+          color: var(--warning);
+          border-color: rgba(245, 158, 11, 0.45);
+        }
+        .status-chip.run-status.danger {
+          background: rgba(239, 68, 68, 0.18);
+          color: var(--danger);
+          border-color: rgba(239, 68, 68, 0.45);
+        }
+        .result-occ {
+          align-items: center;
+          text-align: center;
+        }
+        .occ-count {
+          font-size: 20px;
+          font-weight: 600;
+          color: var(--text);
+          font-family: var(--font-display);
+        }
+        .occ-label {
+          font-size: 10px;
+          color: var(--muted);
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
         }
         .row-actions {
           display: inline-flex;
           gap: 6px;
-          opacity: 0;
-          transition: opacity 140ms ease;
+          justify-content: flex-end;
+          flex-wrap: wrap;
+          align-items: center;
+          opacity: 0.7;
+          transition: opacity 140ms ease, transform 140ms ease;
+          width: 100%;
+        }
+        .row-actions .icon-button {
+          background: var(--surface-2);
+          border-color: rgba(148, 163, 184, 0.35);
         }
         .result-row:hover .row-actions {
           opacity: 1;
@@ -3152,6 +3546,9 @@ const App: React.FC = () => {
           display: inline-flex;
           align-items: center;
           justify-content: center;
+        }
+        .icon-button:hover {
+          background: var(--surface-2);
         }
         .icon-button:disabled {
           cursor: not-allowed;
@@ -3174,9 +3571,20 @@ const App: React.FC = () => {
           .row-actions {
             opacity: 1;
           }
+          .results-header {
+            grid-template-columns: minmax(0, 1fr);
+            gap: 6px;
+          }
+          .result-row {
+            grid-template-columns: minmax(0, 1fr);
+          }
+          .result-occ {
+            align-items: flex-start;
+            text-align: left;
+          }
         }
         .results-layout.drawer-open {
-          grid-template-columns: minmax(0, 1fr) minmax(280px, 380px);
+          grid-template-columns: minmax(0, 1fr) minmax(320px, 420px);
         }
         .drawer {
           position: sticky;
@@ -3184,6 +3592,119 @@ const App: React.FC = () => {
           align-self: start;
           max-height: calc(100vh - 120px);
           overflow: hidden;
+        }
+        .details-overlay {
+          position: fixed;
+          inset: 0;
+          background: rgba(2, 6, 23, 0.55);
+          z-index: 45;
+        }
+        .details-drawer {
+          position: sticky;
+          top: 16px;
+          align-self: start;
+          height: calc(100vh - 120px);
+          border-radius: 18px;
+          border: 1px solid var(--border);
+          background: var(--panel);
+          box-shadow: var(--shadow);
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+          animation: drawerSlide 200ms ease;
+        }
+        .details-drawer.overlay {
+          position: fixed;
+          right: 16px;
+          left: 16px;
+          top: 80px;
+          bottom: 16px;
+          height: auto;
+          z-index: 50;
+        }
+        .drawer-header {
+          padding: 16px;
+          border-bottom: 1px solid var(--border);
+          background: var(--surface-2);
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+        .drawer-title {
+          font-family: var(--font-display);
+          font-size: 16px;
+          font-weight: 600;
+          color: var(--text);
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .drawer-actions {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .drawer-body {
+          padding: 16px;
+          display: flex;
+          flex-direction: column;
+          gap: 14px;
+          overflow: auto;
+        }
+        .drawer-section {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+        }
+        .drawer-section h4 {
+          margin: 0;
+          font-size: 12px;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          color: var(--muted);
+        }
+        .drawer-chip-row {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+        .drawer-list {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          max-height: 260px;
+          overflow: auto;
+        }
+        .drawer-row {
+          padding: 8px 10px;
+          border-radius: 12px;
+          border: 1px solid var(--border);
+          background: var(--panel-elev);
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .drawer-row a {
+          flex: 1;
+          min-width: 0;
+          color: var(--text);
+          text-decoration: none;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .drawer-row button {
+          font-size: 11px;
+        }
+        @keyframes drawerSlide {
+          from {
+            transform: translateX(12px);
+            opacity: 0;
+          }
+          to {
+            transform: translateX(0);
+            opacity: 1;
+          }
         }
         .toast-stack {
           position: fixed;
@@ -3202,6 +3723,29 @@ const App: React.FC = () => {
           color: var(--text);
           box-shadow: var(--shadow);
           font-size: 12px;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+        .toast-action {
+          margin-left: auto;
+          padding: 4px 8px;
+          border-radius: 999px;
+          border: 1px solid var(--border);
+          background: var(--panel-elev);
+          color: var(--text);
+          cursor: pointer;
+          font-size: 11px;
+          font-weight: 600;
+        }
+        .toast.success {
+          border-color: rgba(52, 211, 153, 0.6);
+        }
+        .toast.warning {
+          border-color: rgba(251, 191, 36, 0.7);
+        }
+        .toast.info {
+          border-color: rgba(56, 189, 248, 0.6);
         }
         .skeleton {
           height: 44px;
@@ -3310,6 +3854,39 @@ const App: React.FC = () => {
         .filter-dropdown {
           position: relative;
         }
+        .theme-toggle {
+          position: relative;
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
+        }
+        .theme-menu {
+          position: absolute;
+          top: calc(100% + 8px);
+          right: 0;
+          background: var(--panel);
+          border: 1px solid var(--border);
+          border-radius: 12px;
+          box-shadow: var(--shadow);
+          padding: 6px;
+          min-width: 160px;
+          z-index: 30;
+        }
+        .theme-menu button {
+          width: 100%;
+          text-align: left;
+          padding: 8px 10px;
+          border-radius: 10px;
+          border: 1px solid transparent;
+          background: transparent;
+          color: var(--text);
+          cursor: pointer;
+          font-size: 12px;
+        }
+        .theme-menu button.active {
+          background: var(--surface-2);
+          border-color: var(--border);
+        }
         .filter-dropdown__panel {
           position: absolute;
           top: calc(100% + 8px);
@@ -3356,15 +3933,19 @@ const App: React.FC = () => {
           padding: 6px 12px;
           border-radius: 999px;
           border: 1px solid var(--border);
-          background: transparent;
+          background: var(--surface-2);
           color: var(--muted);
           cursor: pointer;
           font-size: 12px;
+          transition: background 150ms ease, color 150ms ease, border-color 150ms ease, transform 150ms ease;
         }
         .tab-pill.active {
-          background: var(--accent);
+          background: linear-gradient(135deg, var(--accent), var(--accent-2));
           color: white;
-          border-color: var(--accent);
+          border-color: transparent;
+        }
+        .tab-pill:hover {
+          transform: translateY(-1px);
         }
         @media (max-width: 1100px) {
           .shell {
@@ -3425,7 +4006,7 @@ const App: React.FC = () => {
         .card {
           background: var(--panel);
           border: 1px solid var(--border);
-          border-radius: 14px;
+          border-radius: 16px;
           padding: 16px;
           box-shadow: var(--shadow);
         }
@@ -3457,6 +4038,7 @@ const App: React.FC = () => {
         .report-title {
           font-size: 20px;
           font-weight: 700;
+          font-family: var(--font-display);
         }
         .report-subtitle {
           font-size: 12px;
@@ -3470,12 +4052,17 @@ const App: React.FC = () => {
         .report-button {
           padding: 6px 10px;
           border-radius: 999px;
-          border: 1px solid var(--border);
-          background: var(--panel);
+          border: 1px solid rgba(148, 163, 184, 0.35);
+          background: var(--surface-2);
           color: var(--text);
           cursor: pointer;
           font-size: 12px;
           font-weight: 600;
+          transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+        }
+        .report-button:hover {
+          transform: translateY(-1px);
+          border-color: var(--accent);
         }
         .report-card {
           background: var(--panel);
@@ -3803,7 +4390,14 @@ const App: React.FC = () => {
                   ☰
                 </button>
                 <div>
-                  <div style={{ fontWeight: 700, fontSize: "16px" }}>
+                  <div
+                    style={{
+                      fontWeight: 700,
+                      fontSize: "16px",
+                      fontFamily: "var(--font-display)",
+                      letterSpacing: "-0.02em",
+                    }}
+                  >
                     Link Sentry
                   </div>
                   <div style={{ fontSize: "11px", color: "var(--muted)" }}>
@@ -3822,7 +4416,9 @@ const App: React.FC = () => {
                   padding: "0 8px",
                 }}
               >
-                Dashboard
+                {selectedSiteId
+                  ? `Selected: ${safeHost(startUrl || "")}`
+                  : "No site selected"}
               </div>
 
               <div
@@ -3833,43 +4429,118 @@ const App: React.FC = () => {
                   flexWrap: "wrap",
                 }}
               >
-                <button
-                  onClick={handleThemeToggle}
-                  style={{
-                    position: "relative",
-                    width: "44px",
-                    height: "24px",
-                    borderRadius: "999px",
-                    border: "1px solid var(--border)",
-                    background:
-                      themeMode === "dark"
-                        ? "var(--panel-elev)"
-                        : "var(--accent)",
-                    cursor: "pointer",
-                    padding: 0,
-                  }}
-                  title="Toggle theme"
-                >
-                  <span
+                <div className="theme-toggle" ref={themeMenuRef}>
+                  <button
+                    onClick={handleThemeToggle}
                     style={{
-                      position: "absolute",
-                      top: "2px",
-                      left: themeMode === "dark" ? "2px" : "22px",
-                      width: "20px",
-                      height: "20px",
+                      position: "relative",
+                      width: "44px",
+                      height: "24px",
                       borderRadius: "999px",
-                      background: "var(--panel)",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: "center",
-                      fontSize: "12px",
-                      transition: "left 160ms ease",
+                      border: "1px solid var(--border)",
+                      background:
+                        themeMode === "dark"
+                          ? "var(--surface-2)"
+                          : "var(--accent)",
+                      cursor: "pointer",
+                      padding: 0,
                     }}
+                    title="Toggle theme"
                   >
-                    {themeMode === "dark" ? "🌙" : "☀️"}
-                  </span>
-                </button>
+                    <span
+                      style={{
+                        position: "absolute",
+                        top: "2px",
+                        left: themeMode === "dark" ? "2px" : "22px",
+                        width: "20px",
+                        height: "20px",
+                        borderRadius: "999px",
+                        background: "var(--panel)",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        fontSize: "12px",
+                        transition: "left 160ms ease",
+                      }}
+                    >
+                      {themeMode === "dark" ? "🌙" : "☀️"}
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => setThemeMenuOpen((prev) => !prev)}
+                    style={{
+                      padding: "4px 6px",
+                      borderRadius: "8px",
+                      border: "1px solid var(--border)",
+                      background: "var(--panel)",
+                      fontSize: "11px",
+                      cursor: "pointer",
+                    }}
+                    title="Theme settings"
+                  >
+                    System
+                  </button>
+                  {themeMenuOpen && (
+                    <div className="theme-menu">
+                      {(["system", "dark", "light"] as const).map((mode) => (
+                        <button
+                          key={mode}
+                          className={
+                            themePreference === mode ? "active" : undefined
+                          }
+                          onClick={() => {
+                            handleThemeChange(mode);
+                            setThemeMenuOpen(false);
+                          }}
+                        >
+                          {mode === "system"
+                            ? "System"
+                            : mode === "dark"
+                              ? "Dark"
+                              : "Light"}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
 
+                <button
+                  onClick={() => {
+                    setCreateError(null);
+                    setAddSiteOpen(true);
+                  }}
+                  style={{
+                    padding: "6px 12px",
+                    borderRadius: "10px",
+                    border: "1px solid var(--border)",
+                    background: "var(--panel)",
+                    fontSize: "12px",
+                    cursor: "pointer",
+                    fontWeight: 600,
+                  }}
+                >
+                  Add site
+                </button>
+                <button
+                  onClick={handleRunScan}
+                  disabled={!selectedSiteId || triggeringScan || canCancelRun}
+                  style={{
+                    padding: "6px 12px",
+                    borderRadius: "10px",
+                    border: "none",
+                    background: triggeringScan
+                      ? "var(--panel-elev)"
+                      : "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                    color: "white",
+                    fontWeight: 600,
+                    cursor:
+                      triggeringScan || !selectedSiteId || canCancelRun
+                        ? "not-allowed"
+                        : "pointer",
+                  }}
+                >
+                  {triggeringScan ? "Running..." : "New scan"}
+                </button>
                 <button
                   style={{
                     padding: "6px 10px",
@@ -3904,396 +4575,727 @@ const App: React.FC = () => {
                 className={`sidebar card drawer ${isDrawerOpen ? "open" : ""}`}
                 style={{ width: paneWidth }}
               >
-                <div
-                  style={{
-                    display: "flex",
-                    justifyContent: "space-between",
-                    alignItems: "center",
-                  }}
-                >
-                  <div>
-                    <h1
-                      style={{
-                        margin: 0,
-                        fontSize: "20px",
-                        letterSpacing: "-0.02em",
-                      }}
-                    >
-                      Link Sentry
-                    </h1>
-                    <p
-                      style={{
-                        margin: 0,
-                        color: "var(--muted)",
-                        fontSize: "12px",
-                      }}
-                    >
-                      Link integrity monitor
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => setIsDrawerOpen(false)}
-                    className="drawer-close"
-                    style={{
-                      border: "1px solid var(--border)",
-                      background: "var(--panel)",
-                      borderRadius: "10px",
-                      padding: "4px 6px",
-                      cursor: "pointer",
-                      fontSize: "12px",
-                    }}
-                    title="Close menu"
-                  >
-                    ✕
-                  </button>
-                </div>
-
-                <label style={{ fontSize: "12px", color: "var(--muted)" }}>
-                  Search sites
-                  <input
-                    value={siteSearch}
-                    onChange={(e) => setSiteSearch(e.target.value)}
-                    placeholder="Search by URL"
-                    style={{
-                      marginTop: "6px",
-                      width: "100%",
-                      padding: "6px 8px",
-                      borderRadius: "10px",
-                      border: "1px solid var(--border)",
-                      background: "var(--panel)",
-                      color: "var(--text)",
-                      boxSizing: "border-box",
-                    }}
-                  />
-                </label>
-
-                <div>
+                <div className="sidebar-content">
                   <div
-                    style={{
-                      fontSize: "12px",
-                      color: "var(--muted)",
-                      marginBottom: "6px",
-                    }}
-                  >
-                    Add site
-                  </div>
-                  <input
-                    value={newSiteUrl}
-                    onChange={(e) => setNewSiteUrl(e.target.value)}
-                    placeholder="https://example.com"
-                    style={{
-                      width: "100%",
-                      padding: "6px 8px",
-                      borderRadius: "10px",
-                      border: "1px solid var(--border)",
-                      background: "var(--panel)",
-                      color: "var(--text)",
-                      boxSizing: "border-box",
-                    }}
-                  />
-                  <button
-                    onClick={handleCreateSite}
-                    disabled={creatingSite || !newSiteUrl.trim()}
-                    style={{
-                      marginTop: "8px",
-                      padding: "6px 10px",
-                      borderRadius: "999px",
-                      border: "none",
-                      background: creatingSite
-                        ? "var(--panel-elev)"
-                        : "var(--accent)",
-                      color: "white",
-                      fontWeight: 600,
-                      cursor:
-                        creatingSite || !newSiteUrl.trim()
-                          ? "not-allowed"
-                          : "pointer",
-                      fontSize: "12px",
-                    }}
-                  >
-                    {creatingSite ? "Adding..." : "Add site"}
-                  </button>
-                  {createError && (
-                    <div
-                      style={{
-                        fontSize: "12px",
-                        color: "var(--warning)",
-                        marginTop: "6px",
-                      }}
-                    >
-                      {createError}
-                    </div>
-                  )}
-                </div>
-
-                <div>
-                  <div
-                    style={{
-                      fontSize: "12px",
-                      color: "var(--muted)",
-                      marginBottom: "8px",
-                    }}
-                  >
-                    Sites
-                  </div>
-                  {sitesLoading && (
-                    <div
-                      style={{
-                        fontSize: "12px",
-                        color: "var(--muted)",
-                        marginBottom: "6px",
-                      }}
-                    >
-                      Loading sites...
-                    </div>
-                  )}
-                  {sitesError && (
-                    <div
-                      style={{
-                        fontSize: "12px",
-                        color: "var(--warning)",
-                        marginBottom: "6px",
-                      }}
-                    >
-                      {sitesError}
-                    </div>
-                  )}
-                  <div
-                    className="scroll-y"
                     style={{
                       display: "flex",
-                      flexDirection: "column",
-                      gap: "8px",
-                      maxHeight: "220px",
+                      justifyContent: "space-between",
+                      alignItems: "center",
                     }}
                   >
-                    {filteredSites.map((site) => {
-                      const isSelected = site.id === selectedSiteId;
-                      const isDeleting = deletingSiteId === site.id;
+                    <div>
+                      <h1
+                        style={{
+                          margin: 0,
+                          fontSize: "20px",
+                          fontFamily: "var(--font-display)",
+                          letterSpacing: "-0.02em",
+                        }}
+                      >
+                        Link Sentry
+                      </h1>
+                      <p
+                        style={{
+                          margin: 0,
+                          color: "var(--muted)",
+                          fontSize: "12px",
+                        }}
+                      >
+                        Link integrity monitor
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setIsDrawerOpen(false)}
+                      className="drawer-close"
+                      style={{
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        borderRadius: "10px",
+                        padding: "4px 6px",
+                        cursor: "pointer",
+                        fontSize: "12px",
+                      }}
+                      title="Close menu"
+                    >
+                      ✕
+                    </button>
+                  </div>
 
-                      return (
-                        <div
-                          key={site.id}
-                          style={{
-                            borderRadius: "12px",
-                            border: "1px solid var(--border)",
-                            background: isSelected
-                              ? "var(--panel-elev)"
-                              : "var(--panel)",
-                            padding: "8px 10px",
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "6px",
-                          }}
-                        >
-                          <button
-                            onClick={() => handleSelectSite(site)}
-                            style={{
-                              textAlign: "left",
-                              border: "none",
-                              background: "transparent",
-                              color: "var(--text)",
-                              cursor: "pointer",
-                              padding: 0,
-                            }}
-                          >
-                            <div
-                              style={{
-                                fontSize: "13px",
-                                fontWeight: 600,
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                whiteSpace: "nowrap",
-                              }}
-                            >
-                              {site.url}
-                            </div>
-                            <div
-                              style={{
-                                fontSize: "11px",
-                                color: "var(--muted)",
-                                marginTop: "2px",
-                              }}
-                            >
-                              created {formatDate(site.created_at)}
-                            </div>
-                          </button>
+                  <label style={{ fontSize: "12px", color: "var(--muted)" }}>
+                    Search sites
+                    <input
+                      value={siteSearch}
+                      onChange={(e) => setSiteSearch(e.target.value)}
+                      placeholder="Search by URL"
+                      style={{
+                        marginTop: "6px",
+                        width: "100%",
+                        padding: "6px 8px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        color: "var(--text)",
+                        boxSizing: "border-box",
+                      }}
+                    />
+                  </label>
 
+                  <div>
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        color: "var(--muted)",
+                        marginBottom: "8px",
+                      }}
+                    >
+                      Sites
+                    </div>
+                    {sitesLoading && (
+                      <div
+                        style={{
+                          fontSize: "12px",
+                          color: "var(--muted)",
+                          marginBottom: "6px",
+                        }}
+                      >
+                        Loading sites...
+                      </div>
+                    )}
+                    {sitesError && (
+                      <div
+                        style={{
+                          fontSize: "12px",
+                          color: "var(--warning)",
+                          marginBottom: "6px",
+                        }}
+                      >
+                        {sitesError}
+                      </div>
+                    )}
+                    <div
+                      className="scroll-y"
+                      style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "8px",
+                        maxHeight: "220px",
+                      }}
+                    >
+                      {filteredSites.map((site) => {
+                        const isSelected = site.id === selectedSiteId;
+                        const isDeleting = deletingSiteId === site.id;
+
+                        return (
                           <div
+                            key={site.id}
                             style={{
+                              borderRadius: "12px",
+                              border: "1px solid var(--border)",
+                              background: isSelected
+                                ? "var(--panel-elev)"
+                                : "var(--panel)",
+                              padding: "8px 10px",
                               display: "flex",
-                              justifyContent: "flex-end",
+                              flexDirection: "column",
+                              gap: "6px",
                             }}
                           >
                             <button
-                              onClick={() => handleDeleteSite(site.id)}
-                              disabled={isDeleting}
+                              onClick={() => handleSelectSite(site)}
                               style={{
-                                padding: "4px 8px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--danger)",
-                                background: isDeleting
-                                  ? "var(--panel-elev)"
-                                  : "var(--panel)",
-                                color: "var(--danger)",
-                                cursor: isDeleting ? "not-allowed" : "pointer",
-                                fontSize: "11px",
+                                textAlign: "left",
+                                border: "none",
+                                background: "transparent",
+                                color: "var(--text)",
+                                cursor: "pointer",
+                                padding: 0,
                               }}
                             >
-                              {isDeleting ? "Deleting..." : "Delete"}
+                              <div
+                                style={{
+                                  fontSize: "13px",
+                                  fontWeight: 600,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  whiteSpace: "nowrap",
+                                }}
+                              >
+                                {site.url}
+                              </div>
+                              <div
+                                style={{
+                                  fontSize: "11px",
+                                  color: "var(--muted)",
+                                  marginTop: "2px",
+                                }}
+                              >
+                                created {formatDate(site.created_at)}
+                              </div>
                             </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                    {!sitesLoading && filteredSites.length === 0 && (
-                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                        No sites match.
-                      </div>
-                    )}
-                  </div>
-                  {deleteError && (
-                    <p
-                      style={{
-                        color: "var(--warning)",
-                        fontSize: "12px",
-                        marginTop: "8px",
-                      }}
-                    >
-                      {deleteError}
-                    </p>
-                  )}
-                </div>
 
-                <div>
-                  <div
-                    style={{
-                      fontSize: "12px",
-                      color: "var(--muted)",
-                      marginBottom: "8px",
-                    }}
-                  >
-                    Recent scans
-                  </div>
-                  <div
-                    className="scroll-y"
-                    style={{
-                      maxHeight: "220px",
-                      borderRadius: "12px",
-                      border: "1px solid var(--border)",
-                    }}
-                  >
-                    <table
-                      style={{
-                        width: "100%",
-                        borderCollapse: "collapse",
-                        fontSize: "12px",
-                      }}
-                    >
-                      <thead
+                            <div
+                              style={{
+                                display: "flex",
+                                justifyContent: "flex-end",
+                              }}
+                            >
+                              <button
+                                onClick={() => handleDeleteSite(site.id)}
+                                disabled={isDeleting}
+                                style={{
+                                  padding: "4px 8px",
+                                  borderRadius: "999px",
+                                  border: "1px solid var(--danger)",
+                                  background: isDeleting
+                                    ? "var(--panel-elev)"
+                                    : "var(--panel)",
+                                  color: "var(--danger)",
+                                  cursor: isDeleting
+                                    ? "not-allowed"
+                                    : "pointer",
+                                  fontSize: "11px",
+                                }}
+                              >
+                                {isDeleting ? "Deleting..." : "Delete"}
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      {!sitesLoading && filteredSites.length === 0 && (
+                        <div
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          No sites match.
+                        </div>
+                      )}
+                    </div>
+                    {deleteError && (
+                      <p
                         style={{
-                          position: "sticky",
-                          top: 0,
-                          background: "var(--panel)",
-                          zIndex: 1,
+                          color: "var(--warning)",
+                          fontSize: "12px",
+                          marginTop: "8px",
                         }}
                       >
-                        <tr>
-                          <th
-                            style={{
-                              textAlign: "left",
-                              padding: "6px 8px",
-                              borderBottom: "1px solid var(--border)",
-                              color: "var(--muted)",
-                              fontWeight: 500,
-                            }}
-                          >
-                            Started
-                          </th>
-                          <th
-                            style={{
-                              textAlign: "right",
-                              padding: "6px 8px",
-                              borderBottom: "1px solid var(--border)",
-                              color: "var(--muted)",
-                              fontWeight: 500,
-                            }}
-                          >
-                            Broken
-                          </th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {history.map((run) => {
-                          const isSelected = run.id === pinnedRunId;
-                          const brokenPct = percentBroken(
-                            run.checked_links || run.total_links,
-                            run.broken_links,
-                          );
-                          return (
-                            <tr
-                              key={run.id}
-                              onClick={() => {
-                                setResults([]);
-                                resetOccurrencesState();
-                                setSelectedRunId(run.id);
-                                selectedRunIdRef.current = run.id;
+                        {deleteError}
+                      </p>
+                    )}
+                  </div>
 
-                                if (isInProgress(run.status)) {
-                                  setActiveRunId(run.id);
-                                  activeRunIdRef.current = run.id;
-                                  startSse(run.id);
-                                  void refreshSelectedRun(run.id);
-                                } else {
-                                  setActiveRunId(null);
-                                  activeRunIdRef.current = null;
-                                  stopSse();
-                                  void loadResults(run.id);
-                                }
-                              }}
+                  <div>
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        color: "var(--muted)",
+                        marginBottom: "8px",
+                      }}
+                    >
+                      Schedule
+                    </div>
+                    <div
+                      style={{
+                        borderRadius: "12px",
+                        border: "1px solid var(--border)",
+                        padding: "10px",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "10px",
+                      }}
+                    >
+                      {!selectedSite && (
+                        <div
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Select a site to configure auto-scans.
+                        </div>
+                      )}
+                      {selectedSite && (
+                        <>
+                          <label
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              gap: "10px",
+                              fontSize: "12px",
+                              color: "var(--text)",
+                            }}
+                          >
+                            <span>Auto-scan</span>
+                            <input
+                              type="checkbox"
+                              checked={scheduleEnabled}
+                              onChange={(e) =>
+                                setScheduleEnabled(e.target.checked)
+                              }
+                            />
+                          </label>
+                          <div
+                            style={{
+                              display: "grid",
+                              gridTemplateColumns: "1fr",
+                              gap: "8px",
+                            }}
+                          >
+                            <label
                               style={{
-                                cursor: "pointer",
-                                background: isSelected
-                                  ? "var(--panel-elev)"
-                                  : "transparent",
-                              }}
-                            >
-                              <td
-                                style={{
-                                  padding: "6px 8px",
-                                  borderBottom: "1px solid var(--border)",
-                                }}
-                              >
-                                {formatDate(run.started_at)}
-                              </td>
-                              <td
-                                style={{
-                                  padding: "6px 8px",
-                                  borderBottom: "1px solid var(--border)",
-                                  textAlign: "right",
-                                }}
-                              >
-                                {run.broken_links} ({brokenPct})
-                              </td>
-                            </tr>
-                          );
-                        })}
-                        {history.length === 0 && !historyLoading && (
-                          <tr>
-                            <td
-                              colSpan={2}
-                              style={{
-                                padding: "10px",
-                                textAlign: "center",
+                                fontSize: "12px",
                                 color: "var(--muted)",
                               }}
                             >
-                              No scans yet.
-                            </td>
+                              Frequency
+                              <select
+                                value={scheduleFrequency}
+                                onChange={(e) =>
+                                  setScheduleFrequency(
+                                    e.target.value as "daily" | "weekly",
+                                  )
+                                }
+                                style={{
+                                  marginTop: "6px",
+                                  width: "100%",
+                                  padding: "6px 8px",
+                                  borderRadius: "10px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                }}
+                              >
+                                <option value="daily">Daily</option>
+                                <option value="weekly">Weekly</option>
+                              </select>
+                            </label>
+                            {scheduleFrequency === "weekly" && (
+                              <label
+                                style={{
+                                  fontSize: "12px",
+                                  color: "var(--muted)",
+                                }}
+                              >
+                                Day of week (UTC)
+                                <select
+                                  value={scheduleDayOfWeek}
+                                  onChange={(e) =>
+                                    setScheduleDayOfWeek(Number(e.target.value))
+                                  }
+                                  style={{
+                                    marginTop: "6px",
+                                    width: "100%",
+                                    padding: "6px 8px",
+                                    borderRadius: "10px",
+                                    border: "1px solid var(--border)",
+                                    background: "var(--panel)",
+                                    color: "var(--text)",
+                                  }}
+                                >
+                                  <option value={0}>Sunday</option>
+                                  <option value={1}>Monday</option>
+                                  <option value={2}>Tuesday</option>
+                                  <option value={3}>Wednesday</option>
+                                  <option value={4}>Thursday</option>
+                                  <option value={5}>Friday</option>
+                                  <option value={6}>Saturday</option>
+                                </select>
+                              </label>
+                            )}
+                            <label
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Time (UTC)
+                              <input
+                                type="time"
+                                value={scheduleTimeUtc}
+                                onChange={(e) =>
+                                  setScheduleTimeUtc(e.target.value)
+                                }
+                                style={{
+                                  marginTop: "6px",
+                                  width: "100%",
+                                  padding: "6px 8px",
+                                  borderRadius: "10px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                }}
+                              />
+                            </label>
+                          </div>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Next run:{" "}
+                            {formatDate(selectedSite.next_scheduled_at)}
+                          </div>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Last scheduled run:{" "}
+                            {formatDate(selectedSite.last_scheduled_at)}
+                          </div>
+                          {scheduleError && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--warning)",
+                              }}
+                            >
+                              {scheduleError}
+                            </div>
+                          )}
+                          <button
+                            onClick={() => void handleSaveSchedule()}
+                            disabled={scheduleSaving}
+                            style={{
+                              padding: "6px 10px",
+                              borderRadius: "10px",
+                              border: "1px solid var(--border)",
+                              background: scheduleSaving
+                                ? "var(--panel-elev)"
+                                : "var(--panel)",
+                              cursor: scheduleSaving
+                                ? "not-allowed"
+                                : "pointer",
+                              fontSize: "12px",
+                              fontWeight: 600,
+                            }}
+                          >
+                            {scheduleSaving ? "Saving..." : "Save schedule"}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        color: "var(--muted)",
+                        marginBottom: "8px",
+                      }}
+                    >
+                      Notifications
+                    </div>
+                    <div
+                      style={{
+                        borderRadius: "12px",
+                        border: "1px solid var(--border)",
+                        padding: "10px",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "10px",
+                      }}
+                    >
+                      {!selectedSite && (
+                        <div
+                          style={{ fontSize: "12px", color: "var(--muted)" }}
+                        >
+                          Select a site to configure notifications.
+                        </div>
+                      )}
+                      {selectedSite && (
+                        <>
+                          <label
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "space-between",
+                              gap: "10px",
+                              fontSize: "12px",
+                              color: "var(--text)",
+                            }}
+                          >
+                            <span>Email alerts</span>
+                            <input
+                              type="checkbox"
+                              checked={notifyEnabled}
+                              onChange={(e) =>
+                                setNotifyEnabled(e.target.checked)
+                              }
+                            />
+                          </label>
+                          <label
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            Email address
+                            <input
+                              type="email"
+                              value={notifyEmail}
+                              onChange={(e) => setNotifyEmail(e.target.value)}
+                              placeholder="you@example.com"
+                              style={{
+                                marginTop: "6px",
+                                width: "100%",
+                                padding: "6px 8px",
+                                borderRadius: "10px",
+                                border: "1px solid var(--border)",
+                                background: "var(--panel)",
+                                color: "var(--text)",
+                              }}
+                            />
+                          </label>
+                          <label
+                            style={{
+                              display: "flex",
+                              gap: "8px",
+                              alignItems: "center",
+                              fontSize: "12px",
+                              color: "var(--text)",
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={notifyOnlyOnChange}
+                              onChange={(e) =>
+                                setNotifyOnlyOnChange(e.target.checked)
+                              }
+                            />
+                            Only email when new issues appear
+                          </label>
+                          <label
+                            style={{
+                              display: "flex",
+                              gap: "8px",
+                              alignItems: "center",
+                              fontSize: "12px",
+                              color: "var(--text)",
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={notifyIncludeBroken}
+                              onChange={(e) =>
+                                setNotifyIncludeBroken(e.target.checked)
+                              }
+                            />
+                            Include broken + no response
+                          </label>
+                          <label
+                            style={{
+                              display: "flex",
+                              gap: "8px",
+                              alignItems: "center",
+                              fontSize: "12px",
+                              color: "var(--text)",
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={notifyIncludeBlocked}
+                              onChange={(e) =>
+                                setNotifyIncludeBlocked(e.target.checked)
+                              }
+                            />
+                            Include blocked links
+                          </label>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            We email you when scans finish with new issues.
+                          </div>
+                          {notifyError && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--warning)",
+                              }}
+                            >
+                              {notifyError}
+                            </div>
+                          )}
+                          <div
+                            style={{
+                              display: "flex",
+                              gap: "8px",
+                              flexWrap: "wrap",
+                            }}
+                          >
+                            <button
+                              onClick={() => void handleSaveNotifications()}
+                              disabled={notifySaving}
+                              style={{
+                                padding: "6px 10px",
+                                borderRadius: "10px",
+                                border: "1px solid var(--border)",
+                                background: notifySaving
+                                  ? "var(--panel-elev)"
+                                  : "var(--panel)",
+                                cursor: notifySaving
+                                  ? "not-allowed"
+                                  : "pointer",
+                                fontSize: "12px",
+                                fontWeight: 600,
+                              }}
+                            >
+                              {notifySaving ? "Saving..." : "Save"}
+                            </button>
+                            <button
+                              onClick={() => void handleSendTestEmail()}
+                              disabled={
+                                notifyTestSending ||
+                                !notifyEmail.trim() ||
+                                !notifyEnabled
+                              }
+                              style={{
+                                padding: "6px 10px",
+                                borderRadius: "10px",
+                                border: "1px solid var(--border)",
+                                background: notifyTestSending
+                                  ? "var(--panel-elev)"
+                                  : "var(--panel)",
+                                cursor:
+                                  notifyTestSending ||
+                                  !notifyEmail.trim() ||
+                                  !notifyEnabled
+                                    ? "not-allowed"
+                                    : "pointer",
+                                fontSize: "12px",
+                              }}
+                            >
+                              {notifyTestSending
+                                ? "Sending..."
+                                : "Send test email"}
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div
+                      style={{
+                        fontSize: "12px",
+                        color: "var(--muted)",
+                        marginBottom: "8px",
+                      }}
+                    >
+                      Recent scans
+                    </div>
+                    <div
+                      className="scroll-y"
+                      style={{
+                        maxHeight: "220px",
+                        borderRadius: "12px",
+                        border: "1px solid var(--border)",
+                      }}
+                    >
+                      <table
+                        style={{
+                          width: "100%",
+                          borderCollapse: "collapse",
+                          fontSize: "12px",
+                        }}
+                      >
+                        <thead
+                          style={{
+                            position: "sticky",
+                            top: 0,
+                            background: "var(--panel)",
+                            zIndex: 1,
+                          }}
+                        >
+                          <tr>
+                            <th
+                              style={{
+                                textAlign: "left",
+                                padding: "6px 8px",
+                                borderBottom: "1px solid var(--border)",
+                                color: "var(--muted)",
+                                fontWeight: 500,
+                              }}
+                            >
+                              Started
+                            </th>
+                            <th
+                              style={{
+                                textAlign: "right",
+                                padding: "6px 8px",
+                                borderBottom: "1px solid var(--border)",
+                                color: "var(--muted)",
+                                fontWeight: 500,
+                              }}
+                            >
+                              Broken
+                            </th>
                           </tr>
-                        )}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {history.map((run) => {
+                            const isSelected = run.id === pinnedRunId;
+                            const brokenPct = percentBroken(
+                              run.checked_links || run.total_links,
+                              run.broken_links,
+                            );
+                            return (
+                              <tr
+                                key={run.id}
+                                onClick={() => {
+                                  setResults([]);
+                                  resetOccurrencesState();
+                                  setSelectedRunId(run.id);
+                                  selectedRunIdRef.current = run.id;
+
+                                  if (isInProgress(run.status)) {
+                                    setActiveRunId(run.id);
+                                    activeRunIdRef.current = run.id;
+                                    startSse(run.id);
+                                    void refreshSelectedRun(run.id);
+                                  } else {
+                                    setActiveRunId(null);
+                                    activeRunIdRef.current = null;
+                                    stopSse();
+                                    void loadResults(run.id);
+                                  }
+                                }}
+                                style={{
+                                  cursor: "pointer",
+                                  background: isSelected
+                                    ? "var(--panel-elev)"
+                                    : "transparent",
+                                }}
+                              >
+                                <td
+                                  style={{
+                                    padding: "6px 8px",
+                                    borderBottom: "1px solid var(--border)",
+                                  }}
+                                >
+                                  {formatDate(run.started_at)}
+                                </td>
+                                <td
+                                  style={{
+                                    padding: "6px 8px",
+                                    borderBottom: "1px solid var(--border)",
+                                    textAlign: "right",
+                                  }}
+                                >
+                                  {run.broken_links} ({brokenPct})
+                                </td>
+                              </tr>
+                            );
+                          })}
+                          {history.length === 0 && !historyLoading && (
+                            <tr>
+                              <td
+                                colSpan={2}
+                                style={{
+                                  padding: "10px",
+                                  textAlign: "center",
+                                  color: "var(--muted)",
+                                }}
+                              >
+                                No scans yet.
+                              </td>
+                            </tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               </aside>
@@ -4316,7 +5318,13 @@ const App: React.FC = () => {
                   }}
                 >
                   <div style={{ minWidth: 0 }}>
-                    <div style={{ fontSize: "22px", fontWeight: 700 }}>
+                    <div
+                      style={{
+                        fontSize: "22px",
+                        fontWeight: 700,
+                        fontFamily: "var(--font-display)",
+                      }}
+                    >
                       {startUrl ? safeHost(startUrl) : "No site selected"}
                     </div>
                     <div
@@ -4372,26 +5380,6 @@ const App: React.FC = () => {
                     >
                       Ignore rules
                     </button>
-                    <button
-                      onClick={handleRunScan}
-                      disabled={!selectedSiteId || triggeringScan}
-                      style={{
-                        padding: "6px 12px",
-                        borderRadius: "999px",
-                        border: "none",
-                        background: triggeringScan
-                          ? "var(--panel-elev)"
-                          : "var(--success)",
-                        color: "white",
-                        fontWeight: 600,
-                        cursor:
-                          triggeringScan || !selectedSiteId
-                            ? "not-allowed"
-                            : "pointer",
-                      }}
-                    >
-                      {triggeringScan ? "Running..." : "New scan"}
-                    </button>
                     <a
                       href={startUrl || "#"}
                       target="_blank"
@@ -4413,344 +5401,935 @@ const App: React.FC = () => {
                   </div>
                 </div>
 
-                <div ref={scansRef} className="card" style={{ padding: "0" }}>
-                  {showProgress && selectedRun && (
+                {!hasSites && (
+                  <div className="card" style={{ padding: "24px" }}>
                     <div
                       style={{
-                        padding: "16px 16px 0 16px",
-                        display: "flex",
-                        gap: "12px",
-                        alignItems: "flex-start",
-                        flexWrap: "wrap",
+                        fontSize: "18px",
+                        fontWeight: 600,
+                        fontFamily: "var(--font-display)",
+                        marginBottom: "8px",
                       }}
                     >
-                      <div style={{ flex: 1, minWidth: "240px" }}>
-                        <ScanProgressBar
-                          status={
-                            progressPhase === "completed"
-                              ? "completed"
-                              : selectedRun.status
-                          }
-                          totalLinks={selectedRun.total_links}
-                          checkedLinks={selectedRun.checked_links}
-                          brokenLinks={selectedRun.broken_links}
-                          blockedLinks={blockedResults.length}
-                          noResponseLinks={
-                            visibleResults.filter(
-                              (row) => row.classification === "no_response",
-                            ).length
-                          }
-                          lastUpdateAt={lastProgressAt ?? null}
-                        />
+                      Add your first site to start scanning
+                    </div>
+                    <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                      Link Sentry monitors your URLs, detects broken links, and
+                      highlights blocked or timed-out requests.
+                    </div>
+                    <div style={{ marginTop: "16px" }}>
+                      <button
+                        onClick={() => {
+                          setCreateError(null);
+                          setAddSiteOpen(true);
+                        }}
+                        style={{
+                          padding: "8px 14px",
+                          borderRadius: "999px",
+                          border: "none",
+                          background:
+                            "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                          color: "white",
+                          fontWeight: 600,
+                          cursor: "pointer",
+                        }}
+                      >
+                        Add a site
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {hasSites && (
+                  <div ref={scansRef} className="card" style={{ padding: "0" }}>
+                    {showProgress && selectedRun && (
+                      <div
+                        style={{
+                          padding: "16px 16px 0 16px",
+                          display: "flex",
+                          gap: "12px",
+                          alignItems: "flex-start",
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        <div style={{ flex: 1, minWidth: "240px" }}>
+                          <ScanProgressBar
+                            status={
+                              progressPhase === "completed"
+                                ? "completed"
+                                : selectedRun.status
+                            }
+                            totalLinks={selectedRun.total_links}
+                            checkedLinks={selectedRun.checked_links}
+                            brokenLinks={selectedRun.broken_links}
+                            blockedLinks={blockedResults.length}
+                            noResponseLinks={
+                              visibleResults.filter(
+                                (row) => row.classification === "no_response",
+                              ).length
+                            }
+                            lastUpdateAt={lastProgressAt ?? null}
+                          />
+                        </div>
+                        {canCancelRun && (
+                          <button
+                            onClick={handleCancelScan}
+                            style={{
+                              padding: "10px 14px",
+                              borderRadius: "10px",
+                              border: "1px solid var(--danger)",
+                              background: "var(--danger)",
+                              color: "white",
+                              fontSize: "12px",
+                              fontWeight: 600,
+                              cursor: "pointer",
+                            }}
+                          >
+                            Cancel scan
+                          </button>
+                        )}
                       </div>
-                      {selectedRun.status === "in_progress" && (
-                        <button
-                          onClick={handleCancelScan}
+                    )}
+                    {!showProgress && (
+                      <div style={{ padding: "16px 16px 0 16px" }} />
+                    )}
+                    <div
+                      style={{
+                        padding: "16px",
+                        borderBottom: "1px solid var(--border)",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "12px",
+                      }}
+                    >
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          gap: "12px",
+                          flexWrap: "wrap",
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontWeight: 600 }}>
+                            {runHeadingText}
+                          </div>
+                          <div
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
+                          >
+                            {selectedRun
+                              ? `Started ${formatRelative(selectedRun.started_at)}`
+                              : "No scans yet"}
+                          </div>
+                        </div>
+                        {selectedRun && (
+                          <div
+                            style={{
+                              display: "flex",
+                              alignItems: "center",
+                              gap: "8px",
+                            }}
+                          >
+                            <span
+                              className={`status-chip run-status ${runStatusTone(
+                                selectedRun.status,
+                              )}`}
+                            >
+                              {selectedRun.status.replace("_", " ")}
+                            </span>
+                            {(canRetryRun || canRescan) && (
+                              <button
+                                onClick={() => {
+                                  if (canRescan) {
+                                    void handleRunScan();
+                                  } else {
+                                    void handleRetryScan();
+                                  }
+                                }}
+                                className="report-button"
+                                disabled={
+                                  (canRescan &&
+                                    (!selectedSiteId || triggeringScan)) ||
+                                  (!canRescan && !canRetryRun)
+                                }
+                              >
+                                Retry scan
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                      {selectedRun && (
+                        <div
                           style={{
-                            padding: "10px 14px",
-                            borderRadius: "10px",
-                            border: "1px solid var(--danger)",
-                            background: "var(--danger)",
-                            color: "white",
+                            display: "flex",
+                            flexWrap: "wrap",
+                            gap: "16px",
                             fontSize: "12px",
-                            fontWeight: 600,
-                            cursor: "pointer",
+                            color: "var(--muted)",
                           }}
                         >
-                          Cancel scan
-                        </button>
+                          <span>
+                            Duration{" "}
+                            {formatDuration(
+                              selectedRun.started_at,
+                              selectedRun.finished_at,
+                            )}
+                          </span>
+                          <span>
+                            Finished{" "}
+                            {formatDate(selectedRun.finished_at ?? null)}
+                          </span>
+                          {selectedRun.error_message && (
+                            <span style={{ color: "var(--warning)" }}>
+                              {selectedRun.error_message}
+                            </span>
+                          )}
+                        </div>
+                      )}
+                      {selectedRun && compareRun && diffSummary && (
+                        <div
+                          style={{
+                            paddingTop: "10px",
+                            borderTop: "1px solid var(--border)",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "8px",
+                            fontSize: "12px",
+                          }}
+                        >
+                          <span style={{ color: "var(--muted)" }}>
+                            Compared to {formatRelative(compareRun.started_at)}{" "}
+                            · {formatDate(compareRun.started_at)}
+                          </span>
+                          <div
+                            style={{
+                              display: "flex",
+                              flexWrap: "wrap",
+                              gap: "12px",
+                              color: "var(--text)",
+                              fontWeight: 600,
+                            }}
+                          >
+                            <span>New issues {diffSummary.addedIssues}</span>
+                            <span>Fixed {diffSummary.removedIssues}</span>
+                            <span>Changed {diffSummary.changed}</span>
+                            <span>Unchanged {diffSummary.unchanged}</span>
+                          </div>
+                          {!hasDiffChanges && (
+                            <span style={{ color: "var(--muted)" }}>
+                              No issue changes since last run.
+                            </span>
+                          )}
+                        </div>
                       )}
                     </div>
-                  )}
-                  {!showProgress && (
-                    <div style={{ padding: "16px 16px 0 16px" }}>
-                      <div className="card" style={{ padding: "12px 14px" }}>
+                    {!selectedRunId && (
+                      <div style={{ padding: "16px" }}>
+                        <div
+                          style={{
+                            padding: "20px",
+                            borderRadius: "12px",
+                            border: "1px dashed var(--border)",
+                            textAlign: "center",
+                            color: "var(--muted)",
+                          }}
+                        >
+                          Select a scan run to explore results, or start a new
+                          scan from the top bar.
+                        </div>
+                      </div>
+                    )}
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        gap: "12px",
+                        flexWrap: "wrap",
+                        marginBottom: "12px",
+                      }}
+                    >
+                      <div
+                        style={{
+                          position: "sticky",
+                          top: 70,
+                          zIndex: 10,
+                          background: "var(--panel)",
+                          padding: "14px 16px",
+                          borderBottom: "1px solid var(--border)",
+                        }}
+                      >
                         <div
                           style={{
                             display: "flex",
                             justifyContent: "space-between",
+                            gap: "12px",
                             alignItems: "center",
                             flexWrap: "wrap",
-                            gap: "12px",
                           }}
                         >
-                          <div>
-                            <div style={{ fontWeight: 600 }}>Diff</div>
+                          {!isSelectedRunInProgress && (
                             <div
                               style={{
                                 fontSize: "12px",
                                 color: "var(--muted)",
                               }}
                             >
-                              {compareRun
-                                ? `Comparing to ${formatRelative(compareRun.started_at)}`
-                                : compareRunId
-                                  ? "Comparing to selected run"
-                                  : "Run another scan to enable comparisons"}
+                              {resultsLoading ? (
+                                <div
+                                  className="skeleton"
+                                  style={{ height: "16px", width: "260px" }}
+                                />
+                              ) : (
+                                <>
+                                  Checked {selectedRun?.checked_links ?? 0} /{" "}
+                                  {selectedRun?.total_links ?? 0} • Broken{" "}
+                                  {selectedRun?.broken_links ?? 0} • Blocked{" "}
+                                  {blockedResults.length} • No response{" "}
+                                  {
+                                    visibleResults.filter(
+                                      (row) =>
+                                        row.classification === "no_response",
+                                    ).length
+                                  }
+                                </>
+                              )}
                             </div>
-                          </div>
+                          )}
+                          {hasActiveFilters && (
+                            <span
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--accent)",
+                              }}
+                            >
+                              Filters active
+                            </span>
+                          )}
                           <div
                             style={{
                               display: "flex",
-                              gap: "10px",
+                              gap: "8px",
                               flexWrap: "wrap",
                               alignItems: "center",
                             }}
                           >
-                            {diffSummary && (
-                              <div
-                                style={{
-                                  display: "flex",
-                                  gap: "10px",
-                                  fontSize: "12px",
-                                  color: "var(--muted)",
-                                  flexWrap: "wrap",
-                                }}
-                              >
-                                <span>
-                                  New issues {diffSummary.addedIssues}
-                                </span>
-                                <span>Fixed {diffSummary.removedIssues}</span>
-                                <span>Changed {diffSummary.changed}</span>
-                                <span>Unchanged {diffSummary.unchanged}</span>
-                              </div>
-                            )}
-                            {hasDiffChanges && (
+                            {(
+                              [
+                                "all",
+                                "broken",
+                                "blocked",
+                                "no_response",
+                                "ok",
+                                "ignored",
+                              ] as const
+                            ).map((tab) => (
                               <button
-                                onClick={() => setDiffOpen((prev) => !prev)}
-                                style={{
-                                  padding: "4px 8px",
-                                  borderRadius: "8px",
-                                  border: "1px solid var(--border)",
-                                  background: "var(--panel)",
-                                  fontSize: "11px",
-                                  cursor: "pointer",
-                                }}
+                                key={tab}
+                                className={`tab-pill ${activeTab === tab ? "active" : ""}`}
+                                onClick={() => setActiveTab(tab)}
                               >
-                                {diffOpen ? "Hide details" : "Show details"}
+                                {tab === "ok"
+                                  ? "OK"
+                                  : tab === "no_response"
+                                    ? "No response"
+                                    : tab === "ignored"
+                                      ? "Ignored"
+                                      : tab[0].toUpperCase() + tab.slice(1)}
                               </button>
-                            )}
+                            ))}
                           </div>
-                        </div>
-                        {diffLoading && (
                           <div
                             style={{
-                              fontSize: "12px",
-                              color: "var(--muted)",
-                              marginTop: "8px",
+                              display: "flex",
+                              gap: "8px",
+                              flexWrap: "wrap",
+                              alignItems: "center",
                             }}
                           >
-                            Loading diff…
-                          </div>
-                        )}
-                        {diffError && (
-                          <div
-                            style={{
-                              fontSize: "12px",
-                              color: "var(--warning)",
-                              marginTop: "8px",
-                            }}
-                          >
-                            {diffError}
-                          </div>
-                        )}
-                        {issueDiff && !hasDiffChanges && (
-                          <div
-                            style={{
-                              fontSize: "12px",
-                              color: "var(--muted)",
-                              marginTop: "8px",
-                            }}
-                          >
-                            No issue changes since last run.
-                          </div>
-                        )}
-                        {issueDiff && hasDiffChanges && diffOpen && (
-                          <div style={{ marginTop: "10px" }}>
                             <div
-                              style={{
-                                display: "flex",
-                                gap: "8px",
-                                flexWrap: "wrap",
-                                marginBottom: "10px",
-                              }}
+                              className="filter-dropdown"
+                              ref={filterDropdownRef}
                             >
-                              {(["added", "removed", "changed"] as const).map(
-                                (tab) => (
-                                  <button
-                                    key={tab}
-                                    className={`tab-pill ${diffTab === tab ? "active" : ""}`}
-                                    onClick={() => setDiffTab(tab)}
-                                  >
-                                    {tab === "added"
-                                      ? `Added (${issueDiff.added.length})`
-                                      : tab === "removed"
-                                        ? `Fixed (${issueDiff.removed.length})`
-                                        : `Changed (${issueDiff.changed.length})`}
-                                  </button>
-                                ),
-                              )}
-                            </div>
-                            <div
-                              style={{
-                                display: "flex",
-                                flexDirection: "column",
-                                gap: "8px",
-                              }}
-                            >
-                              {diffItems.length === 0 && (
-                                <div
-                                  style={{
-                                    fontSize: "12px",
-                                    color: "var(--muted)",
-                                  }}
-                                >
-                                  Nothing in this category.
+                              <button
+                                onClick={() => setFiltersOpen((prev) => !prev)}
+                                className={`tab-pill ${hasActiveFilters ? "active" : ""}`}
+                              >
+                                Filters {filtersOpen ? "▴" : "▾"}
+                              </button>
+                              {filtersOpen && (
+                                <div className="filter-dropdown__panel">
+                                  <div className="filter-row">
+                                    {(
+                                      [
+                                        "all",
+                                        "http_error",
+                                        "no_response",
+                                      ] as const
+                                    ).map((group) => (
+                                      <button
+                                        key={group}
+                                        onClick={() => setStatusGroup(group)}
+                                        className={`tab-pill ${statusGroup === group ? "active" : ""}`}
+                                      >
+                                        {group === "all"
+                                          ? "All responses"
+                                          : group === "http_error"
+                                            ? "HTTP response"
+                                            : "No response"}
+                                      </button>
+                                    ))}
+                                  </div>
+                                  <div className="filter-row">
+                                    {["401/403/429", "404", "5xx"].map(
+                                      (key) => (
+                                        <button
+                                          key={key}
+                                          onClick={() =>
+                                            toggleStatusFilter(key)
+                                          }
+                                          className={`tab-pill ${statusFilters[key] ? "active" : ""}`}
+                                        >
+                                          {key}
+                                        </button>
+                                      ),
+                                    )}
+                                    <button
+                                      onClick={() =>
+                                        toggleStatusFilter("no_response")
+                                      }
+                                      className={`tab-pill ${statusFilters.no_response ? "active" : ""}`}
+                                    >
+                                      No response
+                                    </button>
+                                    <button
+                                      onClick={() =>
+                                        setMinOccurrencesOnly((prev) => !prev)
+                                      }
+                                      className={`tab-pill ${minOccurrencesOnly ? "active" : ""}`}
+                                    >
+                                      Occurrences &gt; 1
+                                    </button>
+                                    <button
+                                      onClick={() =>
+                                        setShowIgnored((prev) => !prev)
+                                      }
+                                      className={`tab-pill ${showIgnored ? "active" : ""}`}
+                                    >
+                                      {showIgnored
+                                        ? "Showing ignored"
+                                        : "Show ignored"}
+                                    </button>
+                                  </div>
+                                  <div className="filter-row">
+                                    <button
+                                      onClick={() => {
+                                        setStatusFilters({});
+                                        setMinOccurrencesOnly(false);
+                                        setSearchQuery("");
+                                        setActiveTab("all");
+                                        setStatusGroup("all");
+                                        setShowIgnored(false);
+                                      }}
+                                      className="tab-pill"
+                                    >
+                                      Reset filters
+                                    </button>
+                                  </div>
                                 </div>
                               )}
-                              {diffItems.map((item) => {
-                                const runIdForOcc =
-                                  diffTab === "removed"
-                                    ? (compareRunId ?? selectedRunId)
-                                    : selectedRunId;
-                                const row = item.row;
-                                const key = `${runIdForOcc}:${row.link_url}`;
-                                const isOpen = !!diffOccurrences[key];
-                                return (
-                                  <div
-                                    key={item.key}
+                            </div>
+                            <input
+                              ref={searchInputRef}
+                              value={searchQuery}
+                              onChange={(e) => setSearchQuery(e.target.value)}
+                              placeholder="Search links"
+                              style={{
+                                padding: "6px 8px",
+                                borderRadius: "10px",
+                                border: "1px solid var(--border)",
+                                background: "var(--panel)",
+                                color: "var(--text)",
+                                width: "180px",
+                              }}
+                            />
+                            <select
+                              value={sortOption}
+                              onChange={(e) =>
+                                setSortOption(
+                                  e.target.value as typeof sortOption,
+                                )
+                              }
+                              style={{
+                                padding: "6px 8px",
+                                borderRadius: "10px",
+                                border: "1px solid var(--border)",
+                                background: "var(--panel)",
+                                color: "var(--text)",
+                              }}
+                            >
+                              <option value="severity">Severity</option>
+                              <option value="occ_desc">Occurrences</option>
+                              <option value="status_asc">Status code ↑</option>
+                              <option value="status_desc">Status code ↓</option>
+                              <option value="recent">Recently seen</option>
+                            </select>
+                            {isSelectedRunInProgress && (
+                              <span
+                                style={{
+                                  fontSize: "12px",
+                                  color: "var(--muted)",
+                                }}
+                              >
+                                Updating…
+                              </span>
+                            )}
+                            <button
+                              onClick={() => setHistoryOpen(true)}
+                              style={{
+                                padding: "6px 10px",
+                                borderRadius: "999px",
+                                border: "1px solid var(--border)",
+                                background: "var(--panel)",
+                                color: "var(--text)",
+                                cursor: "pointer",
+                                fontSize: "12px",
+                                fontWeight: 600,
+                              }}
+                            >
+                              History
+                            </button>
+                            <div
+                              ref={exportMenuRef}
+                              style={{ position: "relative" }}
+                            >
+                              <button
+                                onClick={() =>
+                                  setExportMenuOpen((prev) => !prev)
+                                }
+                                disabled={exportDisabled}
+                                style={{
+                                  padding: "6px 10px",
+                                  borderRadius: "999px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                  cursor: exportDisabled
+                                    ? "not-allowed"
+                                    : "pointer",
+                                  fontSize: "12px",
+                                  fontWeight: 600,
+                                }}
+                              >
+                                Export
+                              </button>
+                              {exportMenuOpen && !exportDisabled && (
+                                <div
+                                  className="export-menu"
+                                  style={{
+                                    position: "absolute",
+                                    right: 0,
+                                    top: "calc(100% + 6px)",
+                                    background: "var(--panel)",
+                                    border: "1px solid var(--border)",
+                                    borderRadius: "12px",
+                                    boxShadow: "var(--shadow)",
+                                    padding: "6px",
+                                    display: "flex",
+                                    flexDirection: "column",
+                                    gap: "4px",
+                                    minWidth: "180px",
+                                    zIndex: 30,
+                                  }}
+                                >
+                                  <button
+                                    onClick={() => triggerExport("csv")}
+                                    disabled={exportLinksDisabled}
                                     style={{
-                                      border: "1px solid var(--border)",
+                                      padding: "8px 10px",
                                       borderRadius: "10px",
-                                      padding: "8px",
-                                      background: "var(--panel-elev)",
+                                      border: "1px solid transparent",
+                                      background: "transparent",
+                                      textAlign: "left",
+                                      cursor: exportLinksDisabled
+                                        ? "not-allowed"
+                                        : "pointer",
+                                      color: "var(--text)",
+                                    }}
+                                  >
+                                    Export CSV (current view)
+                                  </button>
+                                  <button
+                                    onClick={() => triggerExport("json")}
+                                    disabled={exportLinksDisabled}
+                                    style={{
+                                      padding: "8px 10px",
+                                      borderRadius: "10px",
+                                      border: "1px solid transparent",
+                                      background: "transparent",
+                                      textAlign: "left",
+                                      cursor: exportLinksDisabled
+                                        ? "not-allowed"
+                                        : "pointer",
+                                      color: "var(--text)",
+                                    }}
+                                  >
+                                    Export JSON (current view)
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      if (!selectedRunId) return;
+                                      openReport(selectedRunId);
+                                      setExportMenuOpen(false);
+                                    }}
+                                    style={{
+                                      padding: "8px 10px",
+                                      borderRadius: "10px",
+                                      border: "1px solid transparent",
+                                      background: "transparent",
+                                      textAlign: "left",
+                                      cursor: "pointer",
+                                      color: "var(--text)",
+                                    }}
+                                  >
+                                    Open Report
+                                  </button>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div
+                      className={`results-layout ${detailsOpen && !isNarrow ? "drawer-open" : ""}`}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <div className="results-title">
+                          <div>
+                            <div className="results-title__label">Results</div>
+                            <div className="results-title__meta">
+                              Showing {resultsTitleCount} link
+                              {resultsTitleCount === 1 ? "" : "s"}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="results-table">
+                          <div className="results-scroll">
+                            <div
+                              className={`results-header ${activeTab === "ignored" ? "single" : ""}`}
+                            >
+                              {activeTab === "ignored" ? (
+                                <div>Ignored links</div>
+                              ) : (
+                                <>
+                                  <div>Link</div>
+                                  <div>Status</div>
+                                  <div>Hits</div>
+                                  <div>Actions</div>
+                                </>
+                              )}
+                            </div>
+                            {activeTab !== "ignored" && (
+                              <>
+                                {(activeTab === "broken" ||
+                                  activeTab === "blocked") && (
+                                  <div
+                                    style={{
+                                      display: "flex",
+                                      justifyContent: "space-between",
+                                      alignItems: "center",
+                                      gap: "8px",
                                     }}
                                   >
                                     <div
                                       style={{
-                                        display: "flex",
-                                        alignItems: "center",
-                                        gap: "8px",
-                                        flexWrap: "wrap",
+                                        fontSize: "12px",
+                                        fontWeight: 600,
                                       }}
                                     >
-                                      <span
-                                        style={{
-                                          fontSize: "11px",
-                                          padding: "2px 6px",
-                                          borderRadius: "999px",
-                                          background: "var(--chip-bg)",
-                                          color: "var(--chip-text)",
-                                        }}
-                                      >
-                                        {formatClassification(
-                                          row.classification,
-                                        )}
-                                      </span>
-                                      <span
-                                        style={{
-                                          fontSize: "11px",
-                                          color: "var(--muted)",
-                                        }}
-                                      >
-                                        {row.status_code ?? "No response"}
-                                      </span>
-                                      <span
-                                        style={{
-                                          fontSize: "11px",
-                                          color: "var(--muted)",
-                                        }}
-                                      >
-                                        {row.occurrence_count}x
-                                      </span>
-                                      {item.before && item.after && (
-                                        <span
-                                          style={{
-                                            fontSize: "11px",
-                                            color: "var(--muted)",
-                                          }}
-                                        >
-                                          {formatClassification(
-                                            item.before.classification,
-                                          )}{" "}
-                                          {item.before.status_code ??
-                                            "No response"}{" "}
-                                          →{" "}
-                                          {formatClassification(
-                                            item.after.classification,
-                                          )}{" "}
-                                          {item.after.status_code ??
-                                            "No response"}
-                                        </span>
-                                      )}
+                                      {activeTab === "broken"
+                                        ? "Broken links"
+                                        : "Blocked links"}
                                     </div>
+                                    <button
+                                      onClick={() =>
+                                        triggerExport("csv", activeTab)
+                                      }
+                                      disabled={!selectedRunId}
+                                      style={{
+                                        padding: "4px 8px",
+                                        borderRadius: "999px",
+                                        border: "1px solid var(--border)",
+                                        background: "var(--panel)",
+                                        fontSize: "11px",
+                                        cursor: !selectedRunId
+                                          ? "not-allowed"
+                                          : "pointer",
+                                      }}
+                                    >
+                                      Export CSV
+                                    </button>
+                                  </div>
+                                )}
+                                {resultsError && (
+                                  <div
+                                    style={{
+                                      padding: "10px 12px",
+                                      borderRadius: "10px",
+                                      border: "1px solid var(--border)",
+                                      color: "var(--warning)",
+                                    }}
+                                  >
+                                    {resultsError}
+                                  </div>
+                                )}
+                                {resultsLoading &&
+                                  Array.from({ length: 6 }).map((_, idx) => (
+                                    <div key={idx} className="skeleton" />
+                                  ))}
+                                {!resultsLoading &&
+                                  filteredResults.length === 0 &&
+                                  results.length > 0 && (
                                     <div
                                       style={{
-                                        marginTop: "6px",
-                                        fontSize: "12px",
-                                        color: "var(--text)",
-                                        overflow: "hidden",
-                                        textOverflow: "ellipsis",
-                                        whiteSpace: "nowrap",
+                                        padding: "20px",
+                                        borderRadius: "12px",
+                                        border: "1px dashed var(--border)",
+                                        textAlign: "center",
+                                        color: "var(--muted)",
                                       }}
-                                      title={row.link_url}
                                     >
-                                      {row.link_url}
-                                    </div>
-                                    <div style={{ marginTop: "6px" }}>
+                                      <div style={{ marginBottom: "8px" }}>
+                                        No results match these filters.
+                                      </div>
                                       <button
-                                        onClick={() =>
-                                          runIdForOcc &&
-                                          toggleDiffOccurrences(
-                                            runIdForOcc,
-                                            row.link_url,
-                                          )
-                                        }
+                                        onClick={() => {
+                                          setStatusFilters({});
+                                          setMinOccurrencesOnly(false);
+                                          setSearchQuery("");
+                                          setActiveTab("all");
+                                          setStatusGroup("all");
+                                          setShowIgnored(false);
+                                        }}
                                         style={{
-                                          padding: "4px 8px",
-                                          borderRadius: "8px",
+                                          padding: "6px 10px",
+                                          borderRadius: "999px",
                                           border: "1px solid var(--border)",
                                           background: "var(--panel)",
-                                          fontSize: "11px",
+                                          fontSize: "12px",
                                           cursor: "pointer",
                                         }}
                                       >
-                                        {isOpen
-                                          ? "Hide occurrences"
-                                          : "View occurrences"}
+                                        Clear filters
                                       </button>
                                     </div>
-                                    {isOpen && (
+                                  )}
+                                {!resultsLoading &&
+                                  filteredResults.length === 0 &&
+                                  results.length === 0 && (
+                                    <div
+                                      style={{
+                                        padding: "20px",
+                                        borderRadius: "12px",
+                                        border: "1px dashed var(--border)",
+                                        textAlign: "center",
+                                        color: "var(--muted)",
+                                      }}
+                                    >
+                                      No results yet. Run a scan to populate
+                                      this list.
+                                    </div>
+                                  )}
+                                {renderLinkRows(filteredResults, (row) => {
+                                  if (row.classification === "blocked")
+                                    return blockedTheme;
+                                  if (row.classification === "ok")
+                                    return okTheme;
+                                  if (row.classification === "no_response")
+                                    return noResponseTheme;
+                                  return brokenTheme;
+                                })}
+                              </>
+                            )}
+
+                            {activeTab === "ignored" && (
+                              <>
+                                {ignoredError && (
+                                  <div
+                                    style={{
+                                      padding: "10px 12px",
+                                      borderRadius: "10px",
+                                      border: "1px solid var(--border)",
+                                      color: "var(--warning)",
+                                    }}
+                                  >
+                                    {ignoredError}
+                                  </div>
+                                )}
+                                {ignoredLoading &&
+                                  Array.from({ length: 6 }).map((_, idx) => (
+                                    <div key={idx} className="skeleton" />
+                                  ))}
+                                {!ignoredLoading &&
+                                  ignoredResults.length === 0 && (
+                                    <div
+                                      style={{
+                                        padding: "20px",
+                                        borderRadius: "12px",
+                                        border: "1px dashed var(--border)",
+                                        textAlign: "center",
+                                        color: "var(--muted)",
+                                      }}
+                                    >
+                                      No ignored links yet.
+                                    </div>
+                                  )}
+                                {ignoredResults.map((row) => {
+                                  const isOpen = !!ignoredOccurrences[row.id];
+                                  return (
+                                    <div
+                                      key={row.id}
+                                      className="result-row ignored-row"
+                                      style={{
+                                        borderRadius: "10px",
+                                        border: "1px solid var(--border)",
+                                        background: "var(--panel-elev)",
+                                        display: "flex",
+                                        flexDirection: "column",
+                                      }}
+                                    >
                                       <div
                                         style={{
-                                          marginTop: "8px",
+                                          padding: "8px 10px",
                                           display: "flex",
-                                          flexDirection: "column",
-                                          gap: "6px",
+                                          gap: "8px",
+                                          alignItems: "flex-start",
                                         }}
                                       >
-                                        {diffOccLoading[key] && (
+                                        <button
+                                          onClick={() =>
+                                            selectedRunId &&
+                                            toggleIgnoredOccurrences(
+                                              row.id,
+                                              selectedRunId,
+                                            )
+                                          }
+                                          style={{
+                                            background: "transparent",
+                                            border: "none",
+                                            cursor: "pointer",
+                                            fontSize: "16px",
+                                          }}
+                                        >
+                                          {isOpen ? "▼" : "▶"}
+                                        </button>
+                                        <div style={{ flex: 1, minWidth: 0 }}>
+                                          <div
+                                            style={{
+                                              display: "flex",
+                                              gap: "8px",
+                                              alignItems: "center",
+                                              flexWrap: "wrap",
+                                              marginBottom: "6px",
+                                            }}
+                                          >
+                                            <span
+                                              style={{
+                                                fontSize: "11px",
+                                                padding: "2px 6px",
+                                                borderRadius: "999px",
+                                                background: "var(--chip-bg)",
+                                                color: "var(--chip-text)",
+                                              }}
+                                            >
+                                              Ignored
+                                            </span>
+                                            {row.rule_type &&
+                                              row.rule_pattern && (
+                                                <span
+                                                  style={{
+                                                    fontSize: "11px",
+                                                    padding: "2px 6px",
+                                                    borderRadius: "999px",
+                                                    background: "var(--panel)",
+                                                    color: "var(--muted)",
+                                                    border:
+                                                      "1px solid var(--border)",
+                                                  }}
+                                                >
+                                                  {row.rule_type}:{" "}
+                                                  {row.rule_pattern}
+                                                </span>
+                                              )}
+                                            <span
+                                              style={{
+                                                fontSize: "11px",
+                                                color: "var(--muted)",
+                                              }}
+                                            >
+                                              {row.status_code ??
+                                                "No HTTP response"}
+                                            </span>
+                                            <span
+                                              style={{
+                                                fontSize: "11px",
+                                                color: "var(--muted)",
+                                              }}
+                                            >
+                                              {row.occurrence_count}x
+                                            </span>
+                                          </div>
                                           <div
                                             style={{
                                               fontSize: "12px",
-                                              color: "var(--muted)",
+                                              color: "var(--text)",
+                                              overflowWrap: "anywhere",
+                                              wordBreak: "break-word",
+                                              whiteSpace: "normal",
                                             }}
+                                            title={row.link_url}
                                           >
-                                            Loading…
+                                            {row.link_url}
                                           </div>
-                                        )}
-                                        {diffOccError[key] && (
-                                          <div
-                                            style={{
-                                              fontSize: "12px",
-                                              color: "var(--warning)",
-                                            }}
-                                          >
-                                            {diffOccError[key]}
-                                          </div>
-                                        )}
-                                        {(diffOccurrences[key] ?? []).map(
-                                          (occ) => (
+                                        </div>
+                                      </div>
+                                      {isOpen && (
+                                        <div
+                                          className="expand-panel"
+                                          style={{
+                                            padding: "10px 12px",
+                                            borderTop:
+                                              "1px solid var(--border)",
+                                            background: "var(--panel)",
+                                          }}
+                                        >
+                                          {ignoredOccLoading[row.id] && (
+                                            <div
+                                              style={{
+                                                fontSize: "12px",
+                                                color: "var(--muted)",
+                                              }}
+                                            >
+                                              Loading…
+                                            </div>
+                                          )}
+                                          {ignoredOccError[row.id] && (
+                                            <div
+                                              style={{
+                                                fontSize: "12px",
+                                                color: "var(--warning)",
+                                              }}
+                                            >
+                                              {ignoredOccError[row.id]}
+                                            </div>
+                                          )}
+                                          {(
+                                            ignoredOccurrences[row.id] ?? []
+                                          ).map((occ) => (
                                             <div
                                               key={occ.id}
                                               style={{
@@ -4761,685 +6340,114 @@ const App: React.FC = () => {
                                             >
                                               {occ.source_page}
                                             </div>
-                                          ),
-                                        )}
-                                      </div>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
+                                          ))}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </>
+                            )}
                           </div>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "center",
-                      gap: "12px",
-                      flexWrap: "wrap",
-                      marginBottom: "12px",
-                    }}
-                  >
-                    <div
-                      style={{
-                        position: "sticky",
-                        top: 70,
-                        zIndex: 10,
-                        background: "var(--panel)",
-                        padding: "14px 16px",
-                        borderBottom: "1px solid var(--border)",
-                      }}
-                    >
-                      <div
-                        style={{
-                          display: "flex",
-                          justifyContent: "space-between",
-                          gap: "12px",
-                          alignItems: "center",
-                          flexWrap: "wrap",
-                        }}
-                      >
+                        </div>
+
                         {!isSelectedRunInProgress && (
                           <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Checked {selectedRun?.checked_links ?? 0} /{" "}
-                            {selectedRun?.total_links ?? 0} • Broken{" "}
-                            {selectedRun?.broken_links ?? 0} • Blocked{" "}
-                            {blockedResults.length} • Timed out{" "}
-                            {
-                              visibleResults.filter(
-                                (row) => row.classification === "no_response",
-                              ).length
-                            }
-                          </div>
-                        )}
-                        {hasActiveFilters && (
-                          <span
-                            style={{ fontSize: "12px", color: "var(--accent)" }}
-                          >
-                            Filters active
-                          </span>
-                        )}
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: "8px",
-                            flexWrap: "wrap",
-                            alignItems: "center",
-                          }}
-                        >
-                          {(
-                            [
-                              "all",
-                              "broken",
-                              "blocked",
-                              "no_response",
-                              "ok",
-                              "ignored",
-                            ] as const
-                          ).map((tab) => (
-                            <button
-                              key={tab}
-                              className={`tab-pill ${activeTab === tab ? "active" : ""}`}
-                              onClick={() => setActiveTab(tab)}
-                            >
-                              {tab === "ok"
-                                ? "OK"
-                                : tab === "no_response"
-                                  ? "Timed out"
-                                  : tab === "ignored"
-                                    ? "Ignored"
-                                    : tab[0].toUpperCase() + tab.slice(1)}
-                            </button>
-                          ))}
-                        </div>
-                        <div
-                          style={{
-                            display: "flex",
-                            gap: "8px",
-                            flexWrap: "wrap",
-                            alignItems: "center",
-                          }}
-                        >
-                          <div
-                            className="filter-dropdown"
-                            ref={filterDropdownRef}
-                          >
-                            <button
-                              onClick={() => setFiltersOpen((prev) => !prev)}
-                              className={`tab-pill ${hasActiveFilters ? "active" : ""}`}
-                            >
-                              Filters {filtersOpen ? "▴" : "▾"}
-                            </button>
-                            {filtersOpen && (
-                              <div className="filter-dropdown__panel">
-                                <div className="filter-row">
-                                  {(["all", "http_error"] as const).map(
-                                    (group) => (
-                                      <button
-                                        key={group}
-                                        onClick={() => setStatusGroup(group)}
-                                        className={`tab-pill ${statusGroup === group ? "active" : ""}`}
-                                      >
-                                        {group === "all"
-                                          ? "All responses"
-                                          : "HTTP response"}
-                                      </button>
-                                    ),
-                                  )}
-                                </div>
-                                <div className="filter-row">
-                                  {["401/403/429", "404", "5xx"].map((key) => (
-                                    <button
-                                      key={key}
-                                      onClick={() => toggleStatusFilter(key)}
-                                      className={`tab-pill ${statusFilters[key] ? "active" : ""}`}
-                                    >
-                                      {key}
-                                    </button>
-                                  ))}
-                                  <button
-                                    onClick={() =>
-                                      setMinOccurrencesOnly((prev) => !prev)
-                                    }
-                                    className={`tab-pill ${minOccurrencesOnly ? "active" : ""}`}
-                                  >
-                                    Occurrences &gt; 1
-                                  </button>
-                                  <button
-                                    onClick={() =>
-                                      setShowIgnored((prev) => !prev)
-                                    }
-                                    className={`tab-pill ${showIgnored ? "active" : ""}`}
-                                  >
-                                    {showIgnored
-                                      ? "Showing ignored"
-                                      : "Show ignored"}
-                                  </button>
-                                </div>
-                                <div className="filter-row">
-                                  <button
-                                    onClick={() => {
-                                      setStatusFilters({});
-                                      setMinOccurrencesOnly(false);
-                                      setSearchQuery("");
-                                      setActiveTab("all");
-                                      setStatusGroup("all");
-                                      setShowIgnored(false);
-                                    }}
-                                    className="tab-pill"
-                                  >
-                                    Reset filters
-                                  </button>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                          <input
-                            ref={searchInputRef}
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                            placeholder="Search links"
                             style={{
-                              padding: "6px 8px",
-                              borderRadius: "10px",
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
-                              color: "var(--text)",
-                              width: "180px",
-                            }}
-                          />
-                          <select
-                            value={sortOption}
-                            onChange={(e) =>
-                              setSortOption(e.target.value as typeof sortOption)
-                            }
-                            style={{
-                              padding: "6px 8px",
-                              borderRadius: "10px",
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
-                              color: "var(--text)",
+                              marginTop: "12px",
+                              display: "flex",
+                              gap: "12px",
+                              flexWrap: "wrap",
+                              justifyContent: "center",
                             }}
                           >
-                            <option value="severity">Severity</option>
-                            <option value="occ_desc">Occurrences</option>
-                            <option value="status_asc">Status code ↑</option>
-                            <option value="status_desc">Status code ↓</option>
-                            <option value="recent">Recently seen</option>
-                          </select>
-                          {isSelectedRunInProgress && (
-                            <span
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
-                              Updating…
-                            </span>
-                          )}
-                          <button
-                            onClick={() => setHistoryOpen(true)}
-                            style={{
-                              padding: "6px 10px",
-                              borderRadius: "999px",
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
-                              color: "var(--text)",
-                              cursor: "pointer",
-                              fontSize: "12px",
-                              fontWeight: 600,
-                            }}
-                          >
-                            History
-                          </button>
-                          <div
-                            ref={exportMenuRef}
-                            style={{ position: "relative" }}
-                          >
-                            <button
-                              onClick={() => setExportMenuOpen((prev) => !prev)}
-                              disabled={exportDisabled}
-                              style={{
-                                padding: "6px 10px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--border)",
-                                background: "var(--panel)",
-                                color: "var(--text)",
-                                cursor: exportDisabled
-                                  ? "not-allowed"
-                                  : "pointer",
-                                fontSize: "12px",
-                                fontWeight: 600,
-                              }}
-                            >
-                              Export
-                            </button>
-                            {exportMenuOpen && !exportDisabled && (
-                              <div
-                                className="export-menu"
-                                style={{
-                                  position: "absolute",
-                                  right: 0,
-                                  top: "calc(100% + 6px)",
-                                  background: "var(--panel)",
-                                  border: "1px solid var(--border)",
-                                  borderRadius: "12px",
-                                  boxShadow: "var(--shadow)",
-                                  padding: "6px",
-                                  display: "flex",
-                                  flexDirection: "column",
-                                  gap: "4px",
-                                  minWidth: "180px",
-                                  zIndex: 30,
-                                }}
-                              >
-                                <button
-                                  onClick={() => triggerExport("csv")}
-                                  disabled={exportLinksDisabled}
-                                  style={{
-                                    padding: "8px 10px",
-                                    borderRadius: "10px",
-                                    border: "1px solid transparent",
-                                    background: "transparent",
-                                    textAlign: "left",
-                                    cursor: exportLinksDisabled
-                                      ? "not-allowed"
-                                      : "pointer",
-                                    color: "var(--text)",
-                                  }}
-                                >
-                                  Export CSV (current filter)
-                                </button>
-                                <button
-                                  onClick={() => triggerExport("json")}
-                                  disabled={exportLinksDisabled}
-                                  style={{
-                                    padding: "8px 10px",
-                                    borderRadius: "10px",
-                                    border: "1px solid transparent",
-                                    background: "transparent",
-                                    textAlign: "left",
-                                    cursor: exportLinksDisabled
-                                      ? "not-allowed"
-                                      : "pointer",
-                                    color: "var(--text)",
-                                  }}
-                                >
-                                  Export JSON (current filter)
-                                </button>
-                                <button
-                                  onClick={() => {
-                                    if (!selectedRunId) return;
-                                    openReport(selectedRunId);
-                                    setExportMenuOpen(false);
-                                  }}
-                                  style={{
-                                    padding: "8px 10px",
-                                    borderRadius: "10px",
-                                    border: "1px solid transparent",
-                                    background: "transparent",
-                                    textAlign: "left",
-                                    cursor: "pointer",
-                                    color: "var(--text)",
-                                  }}
-                                >
-                                  Open Report
-                                </button>
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div
-                    className={`results-layout ${historyOpen && !isNarrow ? "drawer-open" : ""}`}
-                  >
-                    <div style={{ minWidth: 0 }}>
-                      <div
-                        className="scroll-y"
-                        style={{
-                          maxHeight: "560px",
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: "10px",
-                          padding: "16px",
-                        }}
-                      >
-                        {activeTab !== "ignored" && (
-                          <>
-                            {(activeTab === "broken" ||
-                              activeTab === "blocked") && (
-                              <div
-                                style={{
-                                  display: "flex",
-                                  justifyContent: "space-between",
-                                  alignItems: "center",
-                                  gap: "8px",
-                                }}
-                              >
-                                <div
-                                  style={{ fontSize: "12px", fontWeight: 600 }}
-                                >
-                                  {activeTab === "broken"
-                                    ? "Broken links"
-                                    : "Blocked links"}
-                                </div>
+                            {activeTab === "all" &&
+                              (brokenHasMore ||
+                                blockedHasMore ||
+                                okHasMore ||
+                                noResponseHasMore) && (
                                 <button
                                   onClick={() =>
-                                    triggerExport("csv", activeTab)
+                                    selectedRunId &&
+                                    loadMoreAllResults(selectedRunId)
                                   }
-                                  disabled={!selectedRunId}
+                                  disabled={resultsLoading}
                                   style={{
-                                    padding: "4px 8px",
+                                    padding: "10px 18px",
                                     borderRadius: "999px",
-                                    border: "1px solid var(--border)",
-                                    background: "var(--panel)",
-                                    fontSize: "11px",
-                                    cursor: !selectedRunId
-                                      ? "not-allowed"
+                                    border: "1px solid var(--success)",
+                                    background: "var(--success)",
+                                    color: "white",
+                                    cursor: resultsLoading
+                                      ? "default"
                                       : "pointer",
+                                    opacity: resultsLoading ? 0.6 : 1,
+                                    fontSize: "12px",
+                                    fontWeight: 600,
                                   }}
                                 >
-                                  Export CSV
+                                  {resultsLoading
+                                    ? "Loading..."
+                                    : "Load More Results"}
                                 </button>
-                              </div>
-                            )}
-                            {resultsError && (
-                              <div
-                                style={{
-                                  padding: "10px 12px",
-                                  borderRadius: "10px",
-                                  border: "1px solid var(--border)",
-                                  color: "var(--warning)",
-                                }}
-                              >
-                                {resultsError}
-                              </div>
-                            )}
-                            {resultsLoading &&
-                              Array.from({ length: 6 }).map((_, idx) => (
-                                <div key={idx} className="skeleton" />
-                              ))}
-                            {!resultsLoading &&
-                              filteredResults.length === 0 &&
-                              results.length > 0 && (
-                                <div
-                                  style={{
-                                    padding: "20px",
-                                    borderRadius: "12px",
-                                    border: "1px dashed var(--border)",
-                                    textAlign: "center",
-                                    color: "var(--muted)",
-                                  }}
-                                >
-                                  <div style={{ marginBottom: "8px" }}>
-                                    No results match these filters.
-                                  </div>
-                                  <button
-                                    onClick={() => {
-                                      setStatusFilters({});
-                                      setMinOccurrencesOnly(false);
-                                      setSearchQuery("");
-                                      setActiveTab("all");
-                                      setStatusGroup("all");
-                                      setShowIgnored(false);
-                                    }}
-                                    style={{
-                                      padding: "6px 10px",
-                                      borderRadius: "999px",
-                                      border: "1px solid var(--border)",
-                                      background: "var(--panel)",
-                                      fontSize: "12px",
-                                      cursor: "pointer",
-                                    }}
-                                  >
-                                    Clear filters
-                                  </button>
-                                </div>
                               )}
-                            {!resultsLoading &&
-                              filteredResults.length === 0 &&
-                              results.length === 0 && (
-                                <div
-                                  style={{
-                                    padding: "20px",
-                                    borderRadius: "12px",
-                                    border: "1px dashed var(--border)",
-                                    textAlign: "center",
-                                    color: "var(--muted)",
-                                  }}
-                                >
-                                  No results yet. Run a scan to populate this
-                                  list.
-                                </div>
-                              )}
-                            {renderLinkRows(filteredResults, (row) => {
-                              if (row.classification === "blocked")
-                                return blockedTheme;
-                              if (row.classification === "ok") return okTheme;
-                              if (row.classification === "no_response")
-                                return noResponseTheme;
-                              return brokenTheme;
-                            })}
-                          </>
-                        )}
-
-                        {activeTab === "ignored" && (
-                          <>
-                            {ignoredError && (
-                              <div
-                                style={{
-                                  padding: "10px 12px",
-                                  borderRadius: "10px",
-                                  border: "1px solid var(--border)",
-                                  color: "var(--warning)",
-                                }}
-                              >
-                                {ignoredError}
-                              </div>
-                            )}
-                            {ignoredLoading &&
-                              Array.from({ length: 6 }).map((_, idx) => (
-                                <div key={idx} className="skeleton" />
-                              ))}
-                            {!ignoredLoading && ignoredResults.length === 0 && (
-                              <div
-                                style={{
-                                  padding: "20px",
-                                  borderRadius: "12px",
-                                  border: "1px dashed var(--border)",
-                                  textAlign: "center",
-                                  color: "var(--muted)",
-                                }}
-                              >
-                                No ignored links yet.
-                              </div>
-                            )}
-                            {ignoredResults.map((row) => {
-                              const isOpen = !!ignoredOccurrences[row.id];
-                              return (
-                                <div
-                                  key={row.id}
-                                  className="result-row"
-                                  style={{
-                                    borderRadius: "10px",
-                                    border: "1px solid var(--border)",
-                                    background: "var(--panel-elev)",
-                                    display: "flex",
-                                    flexDirection: "column",
-                                  }}
-                                >
-                                  <div
-                                    style={{
-                                      padding: "8px 10px",
-                                      display: "flex",
-                                      gap: "8px",
-                                      alignItems: "flex-start",
-                                    }}
-                                  >
-                                    <button
-                                      onClick={() =>
-                                        selectedRunId &&
-                                        toggleIgnoredOccurrences(
-                                          row.id,
-                                          selectedRunId,
-                                        )
-                                      }
-                                      style={{
-                                        background: "transparent",
-                                        border: "none",
-                                        cursor: "pointer",
-                                        fontSize: "16px",
-                                      }}
-                                    >
-                                      {isOpen ? "▼" : "▶"}
-                                    </button>
-                                    <div style={{ flex: 1, minWidth: 0 }}>
-                                      <div
-                                        style={{
-                                          display: "flex",
-                                          gap: "8px",
-                                          alignItems: "center",
-                                          flexWrap: "wrap",
-                                          marginBottom: "6px",
-                                        }}
-                                      >
-                                        <span
-                                          style={{
-                                            fontSize: "11px",
-                                            padding: "2px 6px",
-                                            borderRadius: "999px",
-                                            background: "var(--chip-bg)",
-                                            color: "var(--chip-text)",
-                                          }}
-                                        >
-                                          Ignored
-                                        </span>
-                                        {row.rule_type && row.rule_pattern && (
-                                          <span
-                                            style={{
-                                              fontSize: "11px",
-                                              padding: "2px 6px",
-                                              borderRadius: "999px",
-                                              background: "var(--panel)",
-                                              color: "var(--muted)",
-                                              border: "1px solid var(--border)",
-                                            }}
-                                          >
-                                            {row.rule_type}: {row.rule_pattern}
-                                          </span>
-                                        )}
-                                        <span
-                                          style={{
-                                            fontSize: "11px",
-                                            color: "var(--muted)",
-                                          }}
-                                        >
-                                          {row.status_code ??
-                                            "No HTTP response"}
-                                        </span>
-                                        <span
-                                          style={{
-                                            fontSize: "11px",
-                                            color: "var(--muted)",
-                                          }}
-                                        >
-                                          {row.occurrence_count}x
-                                        </span>
-                                      </div>
-                                      <div
-                                        style={{
-                                          fontSize: "12px",
-                                          color: "var(--text)",
-                                          overflowWrap: "anywhere",
-                                          wordBreak: "break-word",
-                                          whiteSpace: "normal",
-                                        }}
-                                        title={row.link_url}
-                                      >
-                                        {row.link_url}
-                                      </div>
-                                    </div>
-                                  </div>
-                                  {isOpen && (
-                                    <div
-                                      className="expand-panel"
-                                      style={{
-                                        padding: "10px 12px",
-                                        borderTop: "1px solid var(--border)",
-                                        background: "var(--panel)",
-                                      }}
-                                    >
-                                      {ignoredOccLoading[row.id] && (
-                                        <div
-                                          style={{
-                                            fontSize: "12px",
-                                            color: "var(--muted)",
-                                          }}
-                                        >
-                                          Loading…
-                                        </div>
-                                      )}
-                                      {ignoredOccError[row.id] && (
-                                        <div
-                                          style={{
-                                            fontSize: "12px",
-                                            color: "var(--warning)",
-                                          }}
-                                        >
-                                          {ignoredOccError[row.id]}
-                                        </div>
-                                      )}
-                                      {(ignoredOccurrences[row.id] ?? []).map(
-                                        (occ) => (
-                                          <div
-                                            key={occ.id}
-                                            style={{
-                                              fontSize: "12px",
-                                              color: "var(--muted)",
-                                              overflowWrap: "anywhere",
-                                            }}
-                                          >
-                                            {occ.source_page}
-                                          </div>
-                                        ),
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
-                              );
-                            })}
-                          </>
-                        )}
-                      </div>
-
-                      {!isSelectedRunInProgress && (
-                        <div
-                          style={{
-                            marginTop: "12px",
-                            display: "flex",
-                            gap: "12px",
-                            flexWrap: "wrap",
-                            justifyContent: "center",
-                          }}
-                        >
-                          {activeTab === "all" &&
-                            (brokenHasMore ||
-                              blockedHasMore ||
-                              okHasMore ||
-                              noResponseHasMore) && (
+                            {activeTab === "broken" && brokenHasMore && (
                               <button
                                 onClick={() =>
                                   selectedRunId &&
-                                  loadMoreAllResults(selectedRunId)
+                                  loadMoreBrokenResults(selectedRunId)
+                                }
+                                disabled={resultsLoading}
+                                style={{
+                                  padding: "10px 18px",
+                                  borderRadius: "999px",
+                                  border: "1px solid var(--danger)",
+                                  background: "var(--danger)",
+                                  color: "white",
+                                  cursor: resultsLoading
+                                    ? "default"
+                                    : "pointer",
+                                  opacity: resultsLoading ? 0.6 : 1,
+                                  fontSize: "12px",
+                                  fontWeight: 600,
+                                }}
+                              >
+                                {resultsLoading
+                                  ? "Loading..."
+                                  : "Load More Results"}
+                              </button>
+                            )}
+                            {activeTab === "blocked" && blockedHasMore && (
+                              <button
+                                onClick={() =>
+                                  selectedRunId &&
+                                  loadMoreBlockedResults(selectedRunId)
+                                }
+                                disabled={resultsLoading}
+                                style={{
+                                  padding: "10px 18px",
+                                  borderRadius: "999px",
+                                  border: "1px solid var(--warning)",
+                                  background: "var(--warning)",
+                                  color: "white",
+                                  cursor: resultsLoading
+                                    ? "default"
+                                    : "pointer",
+                                  opacity: resultsLoading ? 0.6 : 1,
+                                  fontSize: "12px",
+                                  fontWeight: 600,
+                                }}
+                              >
+                                {resultsLoading
+                                  ? "Loading..."
+                                  : "Load More Results"}
+                              </button>
+                            )}
+                            {activeTab === "ok" && okHasMore && (
+                              <button
+                                onClick={() =>
+                                  selectedRunId &&
+                                  loadMoreOkResults(selectedRunId)
                                 }
                                 disabled={resultsLoading}
                                 style={{
@@ -5461,278 +6469,354 @@ const App: React.FC = () => {
                                   : "Load More Results"}
                               </button>
                             )}
-                          {activeTab === "broken" && brokenHasMore && (
-                            <button
-                              onClick={() =>
-                                selectedRunId &&
-                                loadMoreBrokenResults(selectedRunId)
-                              }
-                              disabled={resultsLoading}
-                              style={{
-                                padding: "10px 18px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--danger)",
-                                background: "var(--danger)",
-                                color: "white",
-                                cursor: resultsLoading ? "default" : "pointer",
-                                opacity: resultsLoading ? 0.6 : 1,
-                                fontSize: "12px",
-                                fontWeight: 600,
-                              }}
-                            >
-                              {resultsLoading
-                                ? "Loading..."
-                                : "Load More Results"}
-                            </button>
-                          )}
-                          {activeTab === "blocked" && blockedHasMore && (
-                            <button
-                              onClick={() =>
-                                selectedRunId &&
-                                loadMoreBlockedResults(selectedRunId)
-                              }
-                              disabled={resultsLoading}
-                              style={{
-                                padding: "10px 18px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--warning)",
-                                background: "var(--warning)",
-                                color: "white",
-                                cursor: resultsLoading ? "default" : "pointer",
-                                opacity: resultsLoading ? 0.6 : 1,
-                                fontSize: "12px",
-                                fontWeight: 600,
-                              }}
-                            >
-                              {resultsLoading
-                                ? "Loading..."
-                                : "Load More Results"}
-                            </button>
-                          )}
-                          {activeTab === "ok" && okHasMore && (
-                            <button
-                              onClick={() =>
-                                selectedRunId &&
-                                loadMoreOkResults(selectedRunId)
-                              }
-                              disabled={resultsLoading}
-                              style={{
-                                padding: "10px 18px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--success)",
-                                background: "var(--success)",
-                                color: "white",
-                                cursor: resultsLoading ? "default" : "pointer",
-                                opacity: resultsLoading ? 0.6 : 1,
-                                fontSize: "12px",
-                                fontWeight: 600,
-                              }}
-                            >
-                              {resultsLoading
-                                ? "Loading..."
-                                : "Load More Results"}
-                            </button>
-                          )}
-                          {activeTab === "no_response" && noResponseHasMore && (
-                            <button
-                              onClick={() =>
-                                selectedRunId &&
-                                loadMoreNoResponseResults(selectedRunId)
-                              }
-                              disabled={resultsLoading}
-                              style={{
-                                padding: "10px 18px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--border)",
-                                background: "var(--border)",
-                                color: "var(--text)",
-                                cursor: resultsLoading ? "default" : "pointer",
-                                opacity: resultsLoading ? 0.6 : 1,
-                                fontSize: "12px",
-                                fontWeight: 600,
-                              }}
-                            >
-                              {resultsLoading
-                                ? "Loading..."
-                                : "Load More Results"}
-                            </button>
-                          )}
-                          {activeTab === "ignored" && ignoredHasMore && (
-                            <button
-                              onClick={() =>
-                                selectedRunId &&
-                                loadMoreIgnoredResults(selectedRunId)
-                              }
-                              disabled={ignoredLoading}
-                              style={{
-                                padding: "10px 18px",
-                                borderRadius: "999px",
-                                border: "1px solid var(--border)",
-                                background: "var(--panel)",
-                                color: "var(--text)",
-                                cursor: ignoredLoading ? "default" : "pointer",
-                                opacity: ignoredLoading ? 0.6 : 1,
-                                fontSize: "12px",
-                                fontWeight: 600,
-                              }}
-                            >
-                              {ignoredLoading
-                                ? "Loading..."
-                                : "Load More Results"}
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </div>
+                            {activeTab === "no_response" &&
+                              noResponseHasMore && (
+                                <button
+                                  onClick={() =>
+                                    selectedRunId &&
+                                    loadMoreNoResponseResults(selectedRunId)
+                                  }
+                                  disabled={resultsLoading}
+                                  style={{
+                                    padding: "10px 18px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--border)",
+                                    background: "var(--border)",
+                                    color: "var(--text)",
+                                    cursor: resultsLoading
+                                      ? "default"
+                                      : "pointer",
+                                    opacity: resultsLoading ? 0.6 : 1,
+                                    fontSize: "12px",
+                                    fontWeight: 600,
+                                  }}
+                                >
+                                  {resultsLoading
+                                    ? "Loading..."
+                                    : "Load More Results"}
+                                </button>
+                              )}
+                            {activeTab === "ignored" && ignoredHasMore && (
+                              <button
+                                onClick={() =>
+                                  selectedRunId &&
+                                  loadMoreIgnoredResults(selectedRunId)
+                                }
+                                disabled={ignoredLoading}
+                                style={{
+                                  padding: "10px 18px",
+                                  borderRadius: "999px",
+                                  border: "1px solid var(--border)",
+                                  background: "var(--panel)",
+                                  color: "var(--text)",
+                                  cursor: ignoredLoading
+                                    ? "default"
+                                    : "pointer",
+                                  opacity: ignoredLoading ? 0.6 : 1,
+                                  fontSize: "12px",
+                                  fontWeight: 600,
+                                }}
+                              >
+                                {ignoredLoading
+                                  ? "Loading..."
+                                  : "Load More Results"}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                        <div className="results-footer-space" aria-hidden />
+                      </div>
 
-                    {!isNarrow && historyOpen && (
-                      <div
-                        className="card"
-                        style={{
-                          padding: "16px",
-                          minWidth: "280px",
-                          maxHeight: "620px",
-                          overflow: "auto",
-                        }}
-                      >
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            alignItems: "center",
-                            marginBottom: "12px",
-                          }}
+                      {detailsOpen && selectedLink && (
+                        <aside
+                          className={`details-drawer ${isNarrow ? "overlay" : ""}`}
+                          ref={detailsDrawerRef}
+                          aria-label="Link details drawer"
                         >
-                          <div style={{ fontWeight: 600 }}>History</div>
-                          <button
-                            onClick={() => setHistoryOpen(false)}
-                            style={{
-                              border: "1px solid var(--border)",
-                              background: "var(--panel)",
-                              borderRadius: "8px",
-                              padding: "4px 6px",
-                              cursor: "pointer",
-                              fontSize: "12px",
-                            }}
-                          >
-                            ✕
-                          </button>
-                        </div>
-                        {historyLoading && (
-                          <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            Loading…
-                          </div>
-                        )}
-                        {historyError && (
-                          <div
-                            style={{
-                              fontSize: "12px",
-                              color: "var(--warning)",
-                            }}
-                          >
-                            {historyError}
-                          </div>
-                        )}
-                        {!historyLoading && history.length === 0 && (
-                          <div
-                            style={{ fontSize: "12px", color: "var(--muted)" }}
-                          >
-                            No scans yet.
-                          </div>
-                        )}
-                        <div
-                          style={{
-                            display: "flex",
-                            flexDirection: "column",
-                            gap: "8px",
-                          }}
-                        >
-                          {history.map((run) => (
+                          <div className="drawer-header">
                             <div
-                              key={run.id}
                               style={{
-                                border: "1px solid var(--border)",
-                                borderRadius: "10px",
-                                padding: "8px",
-                                background: "var(--panel-elev)",
                                 display: "flex",
-                                flexDirection: "column",
-                                gap: "6px",
+                                alignItems: "center",
+                                justifyContent: "space-between",
+                                gap: "12px",
                               }}
                             >
                               <div
+                                className="drawer-title"
+                                title={selectedLink.link_url}
+                              >
+                                {selectedLink.link_url}
+                              </div>
+                              <button
+                                ref={detailsCloseRef}
+                                onClick={() => {
+                                  setDetailsOpen(false);
+                                  setDetailsLinkId(null);
+                                }}
+                                className="icon-button"
                                 style={{
-                                  display: "flex",
-                                  justifyContent: "space-between",
-                                  alignItems: "center",
-                                  gap: "8px",
+                                  borderColor: "var(--border)",
+                                  color: "var(--text)",
+                                }}
+                                aria-label="Close details"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                            <div className="drawer-actions">
+                              <button
+                                onClick={() =>
+                                  window.open(
+                                    selectedLink.link_url,
+                                    "_blank",
+                                    "noopener,noreferrer",
+                                  )
+                                }
+                                className="report-button"
+                              >
+                                Open link
+                              </button>
+                              <button
+                                onClick={() =>
+                                  copyToClipboard(
+                                    selectedLink.link_url,
+                                    `drawer:${selectedLink.id}`,
+                                  )
+                                }
+                                className="report-button"
+                              >
+                                Copy URL
+                              </button>
+                              <button
+                                onClick={() => handleRecheckLink(selectedLink)}
+                                className="report-button"
+                                disabled={
+                                  selectedLink.ignored ||
+                                  recheckLoadingId === selectedLink.id
+                                }
+                              >
+                                {recheckLoadingId === selectedLink.id
+                                  ? "Rechecking..."
+                                  : "Recheck now"}
+                              </button>
+                              <button
+                                onClick={() =>
+                                  handleIgnoreLinkWithUndo(selectedLink)
+                                }
+                                className="report-button"
+                                disabled={selectedLink.ignored}
+                              >
+                                Ignore link
+                              </button>
+                            </div>
+                            <div className="drawer-chip-row">
+                              <span
+                                className="status-chip"
+                                style={{
+                                  background:
+                                    selectedLink.status_code == null
+                                      ? "var(--border)"
+                                      : selectedLink.status_code >= 500
+                                        ? "var(--danger)"
+                                        : selectedLink.status_code === 404 ||
+                                            selectedLink.status_code === 410
+                                          ? "var(--danger)"
+                                          : selectedLink.status_code === 401 ||
+                                              selectedLink.status_code ===
+                                                403 ||
+                                              selectedLink.status_code === 429
+                                            ? "var(--warning)"
+                                            : "var(--success)",
+                                  color:
+                                    selectedLink.status_code == null
+                                      ? "var(--muted)"
+                                      : "white",
                                 }}
                               >
-                                <span
+                                {selectedLink.status_code ?? "No response"}
+                              </span>
+                              <span className="status-chip subtle">
+                                {formatClassification(
+                                  selectedLink.classification,
+                                )}
+                              </span>
+                              {selectedLink.ignored && (
+                                <span className="status-chip subtle">
+                                  Ignored
+                                </span>
+                              )}
+                            </div>
+                            {selectedLink.error_message && (
+                              <div
+                                style={{
+                                  fontSize: "12px",
+                                  color: "var(--warning)",
+                                }}
+                              >
+                                {selectedLink.error_message}
+                              </div>
+                            )}
+                          </div>
+                          <div className="drawer-body">
+                            <div className="drawer-section">
+                              <h4>Why this happened</h4>
+                              {getWhyDetails(selectedLink).body.map((line) => (
+                                <div
+                                  key={line}
                                   style={{
-                                    fontSize: "11px",
+                                    fontSize: "12px",
                                     color: "var(--muted)",
                                   }}
                                 >
-                                  {formatRelative(run.started_at)}
-                                </span>
-                                <span
-                                  style={{
-                                    fontSize: "11px",
-                                    color: "var(--text)",
-                                  }}
+                                  {line}
+                                </div>
+                              ))}
+                            </div>
+                            <div className="drawer-section">
+                              <h4>Recommended actions</h4>
+                              <div className="drawer-actions">
+                                <button
+                                  className="report-button"
+                                  onClick={() =>
+                                    handleIgnoreLinkWithUndo(selectedLink)
+                                  }
+                                  disabled={selectedLink.ignored}
                                 >
-                                  {run.status}
-                                </span>
+                                  Ignore exact URL
+                                </button>
+                                <button
+                                  className="report-button"
+                                  onClick={() => {
+                                    const host = safeHost(
+                                      selectedLink.link_url,
+                                    );
+                                    if (host === "unknown") {
+                                      pushToast(
+                                        "Invalid URL for domain rule",
+                                        "warning",
+                                      );
+                                      return;
+                                    }
+                                    void createQuickIgnoreRule("domain", host);
+                                  }}
+                                  disabled={selectedLink.ignored}
+                                >
+                                  Ignore domain
+                                </button>
+                                <button
+                                  className="report-button"
+                                  onClick={() => {
+                                    try {
+                                      const url = new URL(
+                                        selectedLink.link_url,
+                                      );
+                                      const prefix = url.pathname || "/";
+                                      void createQuickIgnoreRule(
+                                        "path_prefix",
+                                        prefix,
+                                      );
+                                    } catch {
+                                      pushToast(
+                                        "Invalid URL for path rule",
+                                        "warning",
+                                      );
+                                    }
+                                  }}
+                                  disabled={selectedLink.ignored}
+                                >
+                                  Ignore path pattern
+                                </button>
                               </div>
+                            </div>
+                            <div className="drawer-section">
+                              <h4>Occurrences</h4>
                               <div
                                 style={{
-                                  fontSize: "11px",
+                                  fontSize: "12px",
                                   color: "var(--muted)",
                                 }}
                               >
-                                Broken {run.broken_links} • Checked{" "}
-                                {run.checked_links}/{run.total_links}
+                                {selectedOccurrencesTotal} total
                               </div>
-                              <div style={{ display: "flex", gap: "8px" }}>
-                                <button
-                                  onClick={() => setSelectedRunId(run.id)}
-                                  style={{
-                                    padding: "4px 6px",
-                                    borderRadius: "6px",
-                                    border: "1px solid var(--border)",
-                                    background: "var(--panel)",
-                                    fontSize: "11px",
-                                    cursor: "pointer",
-                                  }}
-                                >
-                                  View
-                                </button>
-                                {selectedRunId && run.id !== selectedRunId && (
-                                  <button
-                                    onClick={() => setCompareRunId(run.id)}
+                              {selectedOccurrencesLoading &&
+                                selectedOccurrences.length === 0 && (
+                                  <div
                                     style={{
-                                      padding: "4px 6px",
-                                      borderRadius: "6px",
-                                      border: "1px solid var(--border)",
-                                      background: "var(--panel)",
-                                      fontSize: "11px",
-                                      cursor: "pointer",
+                                      fontSize: "12px",
+                                      color: "var(--muted)",
                                     }}
                                   >
-                                    Compare
+                                    Loading occurrences…
+                                  </div>
+                                )}
+                              {selectedOccurrencesError && (
+                                <div
+                                  style={{
+                                    fontSize: "12px",
+                                    color: "var(--warning)",
+                                  }}
+                                >
+                                  {selectedOccurrencesError}
+                                </div>
+                              )}
+                              {!selectedOccurrencesLoading &&
+                                selectedOccurrences.length === 0 && (
+                                  <div
+                                    style={{
+                                      fontSize: "12px",
+                                      color: "var(--muted)",
+                                    }}
+                                  >
+                                    No source pages recorded yet.
+                                  </div>
+                                )}
+                              <div className="drawer-list">
+                                {selectedOccurrences.map((occ) => (
+                                  <div key={occ.id} className="drawer-row">
+                                    <a
+                                      href={occ.source_page}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      title={occ.source_page}
+                                    >
+                                      {occ.source_page}
+                                    </a>
+                                    <button
+                                      onClick={() =>
+                                        copyToClipboard(
+                                          occ.source_page,
+                                          `occ:${occ.id}`,
+                                        )
+                                      }
+                                      className="report-button"
+                                    >
+                                      Copy
+                                    </button>
+                                  </div>
+                                ))}
+                                {selectedOccurrencesHasMore && (
+                                  <button
+                                    onClick={() =>
+                                      selectedLink &&
+                                      handleLoadMoreOccurrences(selectedLink.id)
+                                    }
+                                    disabled={selectedOccurrencesLoading}
+                                    className="report-button"
+                                  >
+                                    {selectedOccurrencesLoading
+                                      ? "Loading..."
+                                      : "Load more occurrences"}
                                   </button>
                                 )}
                               </div>
                             </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
+                          </div>
+                        </aside>
+                      )}
+                    </div>
                   </div>
-                </div>
+                )}
               </main>
             </div>
 
@@ -5740,6 +6824,15 @@ const App: React.FC = () => {
               <div
                 className="drawer-backdrop"
                 onClick={() => setIsDrawerOpen(false)}
+              />
+            )}
+            {detailsOpen && isNarrow && (
+              <div
+                className="details-overlay"
+                onClick={() => {
+                  setDetailsOpen(false);
+                  setDetailsLinkId(null);
+                }}
               />
             )}
 
@@ -5945,7 +7038,149 @@ const App: React.FC = () => {
               </div>
             )}
 
-            {historyOpen && isNarrow && (
+            {addSiteOpen && (
+              <div
+                className="modal-backdrop"
+                onClick={() => setAddSiteOpen(false)}
+              >
+                <div
+                  className="modal"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <div>
+                      <div style={{ fontWeight: 600 }}>Add site</div>
+                      <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                        Enter the root URL to start scanning.
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setAddSiteOpen(false)}
+                      className="icon-button"
+                      style={{ borderColor: "var(--border)" }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <label style={{ fontSize: "12px", color: "var(--muted)" }}>
+                    Site URL
+                    <input
+                      value={newSiteUrl}
+                      onChange={(e) => setNewSiteUrl(e.target.value)}
+                      placeholder="https://example.com"
+                      autoFocus
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void handleCreateSite();
+                        }
+                      }}
+                      style={{
+                        marginTop: "6px",
+                        width: "100%",
+                        padding: "8px 10px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        color: "var(--text)",
+                        boxSizing: "border-box",
+                      }}
+                    />
+                  </label>
+                  {createError && (
+                    <div style={{ fontSize: "12px", color: "var(--warning)" }}>
+                      {createError}
+                    </div>
+                  )}
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "flex-end",
+                      gap: "8px",
+                    }}
+                  >
+                    <button
+                      onClick={() => setAddSiteOpen(false)}
+                      className="report-button"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleCreateSite}
+                      disabled={creatingSite || !newSiteUrl.trim()}
+                      style={{
+                        padding: "8px 12px",
+                        borderRadius: "10px",
+                        border: "none",
+                        background: creatingSite
+                          ? "var(--panel-elev)"
+                          : "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                        color: "white",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        cursor:
+                          creatingSite || !newSiteUrl.trim()
+                            ? "not-allowed"
+                            : "pointer",
+                      }}
+                    >
+                      {creatingSite ? "Adding..." : "Add site"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {shortcutsOpen && (
+              <div
+                className="modal-backdrop"
+                onClick={() => setShortcutsOpen(false)}
+              >
+                <div
+                  className="modal"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                    }}
+                  >
+                    <div style={{ fontWeight: 600 }}>Keyboard shortcuts</div>
+                    <button
+                      onClick={() => setShortcutsOpen(false)}
+                      className="icon-button"
+                      style={{ borderColor: "var(--border)" }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                  <div
+                    style={{
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: "8px",
+                      fontSize: "12px",
+                    }}
+                  >
+                    <div>Esc — Close drawers/modals</div>
+                    <div>/ — Focus link search</div>
+                    <div>N — Start new scan</div>
+                    <div>A — Add site</div>
+                    <div>? — Toggle this help</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {historyOpen && (
               <div
                 className="modal-backdrop"
                 onClick={() => setHistoryOpen(false)}
@@ -6076,8 +7311,21 @@ const App: React.FC = () => {
         )}
         <div className="toast-stack">
           {toasts.map((toast) => (
-            <div key={toast.id} className="toast">
-              {toast.message}
+            <div key={toast.id} className={`toast ${toast.tone ?? "info"}`}>
+              <span>{toast.message}</span>
+              {toast.action && (
+                <button
+                  className="toast-action"
+                  onClick={() => {
+                    toast.action?.onClick();
+                    setToasts((prev) =>
+                      prev.filter((item) => item.id !== toast.id),
+                    );
+                  }}
+                >
+                  {toast.action.label}
+                </button>
+              )}
             </div>
           ))}
         </div>

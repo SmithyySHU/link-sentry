@@ -44,6 +44,8 @@ Link-Sentry aims to make link monitoring a background task that runs automatical
   - listing scan runs
   - fetching results with pagination + totals
   - filtering by classification/status
+- schedule controls to auto-scan sites (daily/weekly, UTC)
+- email notifications with deltas (optional, SMTP-backed)
 - Web dashboard (WIP but usable):
   - browse sites + scan runs
   - view broken/blocked results
@@ -64,6 +66,7 @@ Link-Sentry aims to make link monitoring a background task that runs automatical
 ```txt
 apps/
   api/        # REST API + event endpoints
+  worker/     # queue worker + scheduler tick
   web/        # Dashboard UI
 packages/
   crawler/    # crawling + validation + classification
@@ -80,6 +83,11 @@ packages/
 - Node.js (see `.nvmrc` if present)
 - PostgreSQL
 - `DATABASE_URL` set (API + scripts use it)
+- Email (optional):
+  - `EMAIL_ENABLED=true`
+  - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`
+  - `EMAIL_FROM` (optional)
+  - `EMAIL_TEST_TO` (optional override for test emails)
 
 ### 2) Install
 
@@ -102,6 +110,7 @@ psql "$DATABASE_URL" -f packages/db/migrations/003_add_ignore_rules.sql
 # Example (adjust to your scripts if different)
 npm -w apps/api run dev
 npm -w apps/web run dev
+npm -w apps/worker run dev
 ```
 
 ---

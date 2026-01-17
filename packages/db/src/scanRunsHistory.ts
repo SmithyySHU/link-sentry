@@ -7,6 +7,7 @@ export interface ScanRunHistoryRow {
   status: string;
   started_at: Date;
   finished_at: Date | null;
+  error_message: string | null;
   updated_at: Date;
   start_url: string;
   total_links: number;
@@ -36,6 +37,7 @@ export async function getRecentScanRunsForSite(
         status,
         started_at,
         finished_at,
+        error_message,
         updated_at,
         start_url,
         total_links,
