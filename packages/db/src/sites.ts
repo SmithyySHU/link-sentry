@@ -14,6 +14,8 @@ export interface DbSiteRow {
   last_scheduled_at: Date | null;
   notify_enabled: boolean;
   notify_email: string | null;
+  notify_on: "always" | "issues" | "never";
+  notify_include_csv: boolean;
   notify_only_on_change: boolean;
   notify_include_blocked: boolean;
   notify_include_broken: boolean;
@@ -37,6 +39,8 @@ export async function getSitesForUser(userId: string): Promise<DbSiteRow[]> {
            last_scheduled_at,
            notify_enabled,
            notify_email,
+           notify_on,
+           notify_include_csv,
            notify_only_on_change,
            notify_include_blocked,
            notify_include_broken,
@@ -68,6 +72,8 @@ export async function getAllSites(): Promise<DbSiteRow[]> {
            last_scheduled_at,
            notify_enabled,
            notify_email,
+           notify_on,
+           notify_include_csv,
            notify_only_on_change,
            notify_include_blocked,
            notify_include_broken,
@@ -97,6 +103,8 @@ export async function getSiteById(id: string): Promise<DbSiteRow | null> {
            last_scheduled_at,
            notify_enabled,
            notify_email,
+           notify_on,
+           notify_include_csv,
            notify_only_on_change,
            notify_include_blocked,
            notify_include_broken,
@@ -137,6 +145,8 @@ export async function createSite(
               last_scheduled_at,
               notify_enabled,
               notify_email,
+              notify_on,
+              notify_include_csv,
               notify_only_on_change,
               notify_include_blocked,
               notify_include_broken,

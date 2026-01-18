@@ -19,6 +19,7 @@ export {
   getLatestScanForSite,
   getRecentScansForSite,
   getScanRunById,
+  setScanRunNotified,
 } from "./scans.js";
 export type { ScanRunRow, ScanStatus } from "./scans.js";
 
@@ -83,6 +84,9 @@ export {
   enqueueScanJob,
   failScanJob,
   getJobForScanRun,
+  hasActiveJobForSite,
+  requeueExpiredScanJobs,
+  setScanJobRunId,
 } from "./scanJobs.js";
 export type { ScanJobRow, ScanJobStatus } from "./scanJobs.js";
 
@@ -113,6 +117,7 @@ export {
   getSiteNotificationSettings,
   getLastNotifiedScanRunId,
   hasNotificationEvent,
+  markScanRunNotified,
   recordNotificationEvent,
   setLastNotifiedScanRunId,
   updateSiteNotificationSettings,

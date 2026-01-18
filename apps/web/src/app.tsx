@@ -24,6 +24,7 @@ type SortOption =
   | "status_asc"
   | "status_desc"
   | "recent";
+type NotifyOnOption = "always" | "issues" | "never";
 
 interface Site {
   id: string;
@@ -38,9 +39,8 @@ interface Site {
   last_scheduled_at: string | null;
   notify_enabled: boolean;
   notify_email: string | null;
-  notify_only_on_change: boolean;
-  notify_include_blocked: boolean;
-  notify_include_broken: boolean;
+  notify_on: NotifyOnOption;
+  notify_include_csv: boolean;
   last_notified_scan_run_id: string | null;
 }
 
@@ -479,6 +479,7 @@ const App: React.FC = () => {
   const filterDropdownRef = useRef<HTMLDivElement | null>(null);
   const sidebarRef = useRef<HTMLElement | null>(null);
   const hamburgerRef = useRef<HTMLButtonElement | null>(null);
+  const drawerCloseRef = useRef<HTMLButtonElement | null>(null);
   const detailsDrawerRef = useRef<HTMLDivElement | null>(null);
   const detailsCloseRef = useRef<HTMLButtonElement | null>(null);
   const themeMenuRef = useRef<HTMLDivElement | null>(null);
@@ -622,9 +623,9 @@ const App: React.FC = () => {
   const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [notifyEnabled, setNotifyEnabled] = useState(false);
   const [notifyEmail, setNotifyEmail] = useState("");
-  const [notifyOnlyOnChange, setNotifyOnlyOnChange] = useState(true);
-  const [notifyIncludeBroken, setNotifyIncludeBroken] = useState(true);
-  const [notifyIncludeBlocked, setNotifyIncludeBlocked] = useState(true);
+  const [notifyOn, setNotifyOn] = useState<NotifyOnOption>("issues");
+  const [notifyIncludeCsv, setNotifyIncludeCsv] = useState(false);
+  const [notifyLoading, setNotifyLoading] = useState(false);
   const [notifySaving, setNotifySaving] = useState(false);
   const [notifyTestSending, setNotifyTestSending] = useState(false);
   const [notifyError, setNotifyError] = useState<string | null>(null);
@@ -1342,6 +1343,14 @@ const App: React.FC = () => {
   }, [isDrawerOpen]);
 
   useEffect(() => {
+    if (!isDrawerOpen) return;
+    const id = window.requestAnimationFrame(() => {
+      drawerCloseRef.current?.focus();
+    });
+    return () => window.cancelAnimationFrame(id);
+  }, [isDrawerOpen]);
+
+  useEffect(() => {
     const handleResize = () => setIsNarrow(window.innerWidth < 1360);
     handleResize();
     window.addEventListener("resize", handleResize);
@@ -1873,13 +1882,19 @@ const App: React.FC = () => {
     setScheduleTimeUtc(normalizeTimeInput(selectedSite.schedule_time_utc));
     setScheduleDayOfWeek(selectedSite.schedule_day_of_week ?? 1);
     setScheduleError(null);
-    setNotifyEnabled(selectedSite.notify_enabled ?? false);
-    setNotifyEmail(selectedSite.notify_email ?? "");
-    setNotifyOnlyOnChange(selectedSite.notify_only_on_change ?? true);
-    setNotifyIncludeBroken(selectedSite.notify_include_broken ?? true);
-    setNotifyIncludeBlocked(selectedSite.notify_include_blocked ?? true);
-    setNotifyError(null);
   }, [selectedSite]);
+
+  useEffect(() => {
+    if (!selectedSiteId) {
+      setNotifyEnabled(false);
+      setNotifyEmail("");
+      setNotifyOn("issues");
+      setNotifyIncludeCsv(false);
+      setNotifyError(null);
+      return;
+    }
+    void loadNotificationSettings(selectedSiteId);
+  }, [selectedSiteId]);
 
   useEffect(() => {
     if (!selectedRunId || history.length === 0) {
@@ -2155,22 +2170,64 @@ const App: React.FC = () => {
     }
   }
 
+  async function loadNotificationSettings(siteId: string) {
+    setNotifyLoading(true);
+    setNotifyError(null);
+    try {
+      const res = await fetch(
+        `${API_BASE}/sites/${encodeURIComponent(siteId)}/notification-settings`,
+        {
+          cache: "no-store",
+        },
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Failed to load notification settings: ${res.status}${
+            text ? ` - ${text.slice(0, 200)}` : ""
+          }`,
+        );
+      }
+      const data = (await res.json()) as {
+        notifyEnabled: boolean;
+        notifyEmail: string | null;
+        notifyOn: NotifyOnOption;
+        notifyIncludeCsv: boolean;
+      };
+      setNotifyEnabled(data.notifyEnabled);
+      setNotifyEmail(data.notifyEmail ?? "");
+      setNotifyOn(data.notifyOn);
+      setNotifyIncludeCsv(data.notifyIncludeCsv);
+    } catch (err: unknown) {
+      setNotifyError(
+        getErrorMessage(err, "Failed to load notification settings"),
+      );
+    } finally {
+      setNotifyLoading(false);
+    }
+  }
+
   async function handleSaveNotifications() {
     if (!selectedSiteId) return;
+    if (notifyEnabled && notifyOn !== "never" && !notifyEmail.trim()) {
+      setNotifyError(
+        "Email is required when notifications are enabled and notify on is not never.",
+      );
+      return;
+    }
     setNotifySaving(true);
     setNotifyError(null);
     try {
       const res = await fetch(
-        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/notifications`,
+        `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/notification-settings`,
         {
-          method: "PUT",
+          method: "PATCH",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             enabled: notifyEnabled,
             email: notifyEmail.trim() || null,
-            onlyOnChange: notifyOnlyOnChange,
-            includeBroken: notifyIncludeBroken,
-            includeBlocked: notifyIncludeBlocked,
+            notifyOn,
+            includeCsv: notifyIncludeCsv,
           }),
         },
       );
@@ -2185,11 +2242,14 @@ const App: React.FC = () => {
       const data = (await res.json()) as {
         notifyEnabled: boolean;
         notifyEmail: string | null;
-        notifyOnlyOnChange: boolean;
-        notifyIncludeBlocked: boolean;
-        notifyIncludeBroken: boolean;
-        lastNotifiedScanRunId: string | null;
+        notifyOn: NotifyOnOption;
+        notifyIncludeCsv: boolean;
       };
+
+      setNotifyEnabled(data.notifyEnabled);
+      setNotifyEmail(data.notifyEmail ?? "");
+      setNotifyOn(data.notifyOn);
+      setNotifyIncludeCsv(data.notifyIncludeCsv);
 
       setSites((prev) =>
         prev.map((site) =>
@@ -2198,10 +2258,8 @@ const App: React.FC = () => {
                 ...site,
                 notify_enabled: data.notifyEnabled,
                 notify_email: data.notifyEmail,
-                notify_only_on_change: data.notifyOnlyOnChange,
-                notify_include_blocked: data.notifyIncludeBlocked,
-                notify_include_broken: data.notifyIncludeBroken,
-                last_notified_scan_run_id: data.lastNotifiedScanRunId,
+                notify_on: data.notifyOn,
+                notify_include_csv: data.notifyIncludeCsv,
               }
             : site,
         ),
@@ -2844,7 +2902,26 @@ const App: React.FC = () => {
     const prev = runStatusRef.current.get(run.id);
     if (prev === run.status) return;
     runStatusRef.current.set(run.id, run.status);
-    if (run.status === "completed") pushToast("Scan completed", "success");
+    if (run.status === "completed") {
+      const canUseResults =
+        run.id === selectedRunIdRef.current && results.length > 0;
+      const blockedCount = canUseResults ? blockedResults.length : 0;
+      const noResponseCount = canUseResults
+        ? visibleResults.filter((row) => row.classification === "no_response")
+            .length
+        : 0;
+      const checked = run.checked_links ?? 0;
+      const total = run.total_links ?? 0;
+      const broken = run.broken_links ?? 0;
+      const message = `Scan complete: ${checked}/${total} checked • ${broken} broken • ${blockedCount} blocked • ${noResponseCount} no response`;
+      pushToast(message, "success", {
+        label: "View results",
+        onClick: () => {
+          setSelectedRunId(run.id);
+          scansRef.current?.scrollIntoView({ behavior: "smooth" });
+        },
+      });
+    }
     if (run.status === "failed") pushToast("Scan failed", "warning");
   }
 
@@ -2940,7 +3017,8 @@ const App: React.FC = () => {
         <div
           id={`scan-link-${row.id}`}
           key={row.id}
-          className="result-row"
+          className={`result-row severity-${row.classification}`}
+          data-classification={row.classification}
           style={{
             borderLeft: `3px solid ${theme.border}`,
             background: theme.panelBg,
@@ -3156,6 +3234,8 @@ const App: React.FC = () => {
   const selectedOccurrencesHasMore = selectedLink
     ? (occurrencesHasMoreByLinkId[selectedLink.id] ?? false)
     : false;
+  const showOccurrencesSkeleton =
+    selectedOccurrencesLoading && selectedOccurrences.length === 0;
 
   return (
     <div
@@ -3165,6 +3245,7 @@ const App: React.FC = () => {
         background: "var(--bg)",
         color: "var(--text)",
         padding: "24px",
+        width: "100%",
         maxWidth: "100%",
         overflowX: "hidden",
       }}
@@ -3227,12 +3308,14 @@ const App: React.FC = () => {
         }
         .app-container {
           max-width: 1400px;
+          width: 100%;
           margin: 0 auto;
           display: flex;
           flex-direction: column;
           gap: 24px;
           font-family: var(--font-body);
           min-height: calc(100vh - 48px);
+          min-width: 0;
         }
         .app-shell {
           background: radial-gradient(1200px 420px at 10% -20%, rgba(34, 211, 238, 0.2), transparent 60%),
@@ -3340,6 +3423,10 @@ const App: React.FC = () => {
           display: grid;
           grid-template-columns: 1fr;
           gap: 16px;
+          min-width: 0;
+        }
+        .results-layout > * {
+          min-width: 0;
         }
         .results-title {
           display: flex;
@@ -3365,9 +3452,84 @@ const App: React.FC = () => {
           background: var(--panel);
           overflow: hidden;
           box-shadow: var(--soft-shadow);
+          min-width: 0;
         }
         .results-footer-space {
           height: 16px;
+        }
+        .results-summary {
+          position: sticky;
+          top: 70px;
+          z-index: 10;
+          background: var(--panel);
+          padding: 14px 16px;
+          border-bottom: 1px solid var(--border);
+          display: flex;
+          flex-direction: column;
+          gap: 12px;
+        }
+        .results-summary__top {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+          flex-wrap: wrap;
+        }
+        .results-summary__stats {
+          font-size: 12px;
+          color: var(--muted);
+          display: flex;
+          flex-wrap: wrap;
+          gap: 12px;
+        }
+        .results-summary__chip {
+          font-size: 11px;
+          color: var(--accent);
+          background: var(--surface-accent);
+          border: 1px solid var(--border);
+          padding: 4px 10px;
+          border-radius: 999px;
+          display: inline-flex;
+          align-items: center;
+          gap: 8px;
+        }
+        .results-summary__controls {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 12px;
+          align-items: center;
+          justify-content: space-between;
+        }
+        .results-tabs {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          align-items: center;
+        }
+        .results-controls {
+          display: flex;
+          gap: 8px;
+          flex-wrap: wrap;
+          align-items: center;
+        }
+        .results-controls input,
+        .results-controls select {
+          padding: 6px 10px;
+          border-radius: 10px;
+          border: 1px solid var(--border);
+          background: var(--panel);
+          color: var(--text);
+          font-size: 12px;
+        }
+        .results-controls select {
+          appearance: none;
+          background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+            linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+          background-position: calc(100% - 14px) calc(50% - 3px),
+            calc(100% - 9px) calc(50% - 3px);
+          background-size: 5px 5px, 5px 5px;
+          background-repeat: no-repeat;
+          padding-right: 24px;
         }
         .results-header {
           position: sticky;
@@ -3399,8 +3561,10 @@ const App: React.FC = () => {
           display: flex;
           flex-direction: column;
           gap: 0;
-          overflow: auto;
+          overflow-y: auto;
+          overflow-x: hidden;
           background: var(--panel);
+          min-width: 0;
         }
         .result-row {
           display: grid;
@@ -3408,15 +3572,36 @@ const App: React.FC = () => {
           gap: 12px;
           padding: 14px 16px;
           border-bottom: 1px solid var(--border);
-          transition: transform 140ms ease, box-shadow 140ms ease, background 140ms ease;
+          transition: box-shadow 140ms ease, background 140ms ease;
           position: relative;
           overflow: visible;
           cursor: pointer;
           align-items: center;
+          min-width: 0;
+        }
+        .result-row::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          opacity: 0;
+          pointer-events: none;
+          transition: opacity 140ms ease;
+        }
+        .result-row.severity-broken::after {
+          background: linear-gradient(90deg, rgba(248, 113, 113, 0.12), transparent 50%);
+        }
+        .result-row.severity-blocked::after {
+          background: linear-gradient(90deg, rgba(251, 191, 36, 0.12), transparent 50%);
+        }
+        .result-row.severity-no_response::after {
+          background: linear-gradient(90deg, rgba(148, 163, 184, 0.16), transparent 50%);
         }
         .result-row:hover {
-          transform: translateY(-2px);
           background: var(--surface-accent);
+        }
+        .result-row:hover::after,
+        .result-row:focus-within::after {
+          opacity: 1;
         }
         .result-row:last-child {
           border-bottom: none;
@@ -3452,6 +3637,7 @@ const App: React.FC = () => {
           display: -webkit-box;
           -webkit-line-clamp: 2;
           -webkit-box-orient: vertical;
+          overflow-wrap: anywhere;
           word-break: break-word;
         }
         .result-meta {
@@ -3556,6 +3742,10 @@ const App: React.FC = () => {
         }
         .expand-panel {
           animation: expandFade 160ms ease;
+          overflow: hidden;
+          max-height: 640px;
+          opacity: 1;
+          transition: max-height 200ms ease, opacity 200ms ease;
         }
         @keyframes expandFade {
           from {
@@ -3689,9 +3879,9 @@ const App: React.FC = () => {
           min-width: 0;
           color: var(--text);
           text-decoration: none;
-          overflow: hidden;
-          text-overflow: ellipsis;
-          white-space: nowrap;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+          white-space: normal;
         }
         .drawer-row button {
           font-size: 11px;
@@ -3753,6 +3943,13 @@ const App: React.FC = () => {
           background: linear-gradient(90deg, var(--panel-elev), var(--panel), var(--panel-elev));
           background-size: 200% 100%;
           animation: shimmer 1.2s ease-in-out infinite;
+        }
+        .skeleton--site {
+          height: 58px;
+        }
+        .skeleton--occ {
+          height: 32px;
+          border-radius: 12px;
         }
         .scan-progress {
           border: 1px solid var(--border);
@@ -3899,6 +4096,7 @@ const App: React.FC = () => {
           background: var(--panel);
           box-shadow: var(--shadow);
           z-index: 20;
+          animation: dropdownIn 160ms ease;
         }
         .filter-row {
           display: flex;
@@ -3929,23 +4127,30 @@ const App: React.FC = () => {
           0% { background-position: 200% 0; }
           100% { background-position: -200% 0; }
         }
+        @keyframes dropdownIn {
+          from { opacity: 0; transform: translateY(-4px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
         .tab-pill {
           padding: 6px 12px;
           border-radius: 999px;
           border: 1px solid var(--border);
-          background: var(--surface-2);
+          background: var(--panel);
           color: var(--muted);
           cursor: pointer;
           font-size: 12px;
-          transition: background 150ms ease, color 150ms ease, border-color 150ms ease, transform 150ms ease;
+          transition: background 150ms ease, color 150ms ease, border-color 150ms ease, transform 150ms ease, box-shadow 150ms ease;
         }
         .tab-pill.active {
           background: linear-gradient(135deg, var(--accent), var(--accent-2));
           color: white;
           border-color: transparent;
+          box-shadow: 0 8px 18px rgba(37, 99, 235, 0.25);
         }
         .tab-pill:hover {
           transform: translateY(-1px);
+          border-color: rgba(148, 163, 184, 0.6);
+          box-shadow: 0 6px 14px rgba(15, 23, 42, 0.12);
         }
         @media (max-width: 1100px) {
           .shell {
@@ -4120,11 +4325,13 @@ const App: React.FC = () => {
         }
         .report-table-wrap {
           overflow-x: auto;
+          min-width: 0;
         }
         .report-table {
           width: 100%;
           border-collapse: collapse;
           font-size: 12px;
+          table-layout: fixed;
         }
         .report-table th,
         .report-table td {
@@ -4137,6 +4344,10 @@ const App: React.FC = () => {
           color: var(--muted);
           text-transform: uppercase;
           letter-spacing: 0.04em;
+        }
+        .report-table td {
+          overflow-wrap: anywhere;
+          word-break: break-word;
         }
         .report-empty {
           padding: 12px;
@@ -4377,6 +4588,8 @@ const App: React.FC = () => {
                   ref={hamburgerRef}
                   onClick={() => setIsDrawerOpen(true)}
                   className="hamburger"
+                  aria-controls="sidebar-drawer"
+                  aria-expanded={isDrawerOpen}
                   style={{
                     border: "1px solid var(--border)",
                     background: "var(--panel)",
@@ -4504,23 +4717,25 @@ const App: React.FC = () => {
                   )}
                 </div>
 
-                <button
-                  onClick={() => {
-                    setCreateError(null);
-                    setAddSiteOpen(true);
-                  }}
-                  style={{
-                    padding: "6px 12px",
-                    borderRadius: "10px",
-                    border: "1px solid var(--border)",
-                    background: "var(--panel)",
-                    fontSize: "12px",
-                    cursor: "pointer",
-                    fontWeight: 600,
-                  }}
-                >
-                  Add site
-                </button>
+                {hasSites && (
+                  <button
+                    onClick={() => {
+                      setCreateError(null);
+                      setAddSiteOpen(true);
+                    }}
+                    style={{
+                      padding: "6px 12px",
+                      borderRadius: "10px",
+                      border: "1px solid var(--border)",
+                      background: "var(--panel)",
+                      fontSize: "12px",
+                      cursor: "pointer",
+                      fontWeight: 600,
+                    }}
+                  >
+                    Add site
+                  </button>
+                )}
                 <button
                   onClick={handleRunScan}
                   disabled={!selectedSiteId || triggeringScan || canCancelRun}
@@ -4571,9 +4786,11 @@ const App: React.FC = () => {
 
             <div className="shell">
               <aside
+                id="sidebar-drawer"
                 ref={sidebarRef}
                 className={`sidebar card drawer ${isDrawerOpen ? "open" : ""}`}
                 style={{ width: paneWidth }}
+                aria-label="Site navigation"
               >
                 <div className="sidebar-content">
                   <div
@@ -4607,6 +4824,7 @@ const App: React.FC = () => {
                     <button
                       onClick={() => setIsDrawerOpen(false)}
                       className="drawer-close"
+                      ref={drawerCloseRef}
                       style={{
                         border: "1px solid var(--border)",
                         background: "var(--panel)",
@@ -4650,17 +4868,6 @@ const App: React.FC = () => {
                     >
                       Sites
                     </div>
-                    {sitesLoading && (
-                      <div
-                        style={{
-                          fontSize: "12px",
-                          color: "var(--muted)",
-                          marginBottom: "6px",
-                        }}
-                      >
-                        Loading sites...
-                      </div>
-                    )}
                     {sitesError && (
                       <div
                         style={{
@@ -4681,6 +4888,14 @@ const App: React.FC = () => {
                         maxHeight: "220px",
                       }}
                     >
+                      {sitesLoading &&
+                        filteredSites.length === 0 &&
+                        Array.from({ length: 4 }).map((_, idx) => (
+                          <div
+                            key={`site-skeleton-${idx}`}
+                            className="skeleton skeleton--site"
+                          />
+                        ))}
                       {filteredSites.map((site) => {
                         const isSelected = site.id === selectedSiteId;
                         const isDeleting = deletingSiteId === site.id;
@@ -5013,6 +5228,7 @@ const App: React.FC = () => {
                             <input
                               type="checkbox"
                               checked={notifyEnabled}
+                              disabled={notifyLoading}
                               onChange={(e) =>
                                 setNotifyEnabled(e.target.checked)
                               }
@@ -5027,6 +5243,7 @@ const App: React.FC = () => {
                               value={notifyEmail}
                               onChange={(e) => setNotifyEmail(e.target.value)}
                               placeholder="you@example.com"
+                              disabled={notifyLoading}
                               style={{
                                 marginTop: "6px",
                                 width: "100%",
@@ -5039,22 +5256,29 @@ const App: React.FC = () => {
                             />
                           </label>
                           <label
-                            style={{
-                              display: "flex",
-                              gap: "8px",
-                              alignItems: "center",
-                              fontSize: "12px",
-                              color: "var(--text)",
-                            }}
+                            style={{ fontSize: "12px", color: "var(--muted)" }}
                           >
-                            <input
-                              type="checkbox"
-                              checked={notifyOnlyOnChange}
+                            Notify on
+                            <select
+                              value={notifyOn}
                               onChange={(e) =>
-                                setNotifyOnlyOnChange(e.target.checked)
+                                setNotifyOn(e.target.value as NotifyOnOption)
                               }
-                            />
-                            Only email when new issues appear
+                              disabled={notifyLoading}
+                              style={{
+                                marginTop: "6px",
+                                width: "100%",
+                                padding: "6px 8px",
+                                borderRadius: "10px",
+                                border: "1px solid var(--border)",
+                                background: "var(--panel)",
+                                color: "var(--text)",
+                              }}
+                            >
+                              <option value="always">Always</option>
+                              <option value="issues">Only when issues</option>
+                              <option value="never">Never</option>
+                            </select>
                           </label>
                           <label
                             style={{
@@ -5067,36 +5291,29 @@ const App: React.FC = () => {
                           >
                             <input
                               type="checkbox"
-                              checked={notifyIncludeBroken}
+                              checked={notifyIncludeCsv}
                               onChange={(e) =>
-                                setNotifyIncludeBroken(e.target.checked)
+                                setNotifyIncludeCsv(e.target.checked)
                               }
+                              disabled={notifyLoading}
                             />
-                            Include broken + no response
-                          </label>
-                          <label
-                            style={{
-                              display: "flex",
-                              gap: "8px",
-                              alignItems: "center",
-                              fontSize: "12px",
-                              color: "var(--text)",
-                            }}
-                          >
-                            <input
-                              type="checkbox"
-                              checked={notifyIncludeBlocked}
-                              onChange={(e) =>
-                                setNotifyIncludeBlocked(e.target.checked)
-                              }
-                            />
-                            Include blocked links
+                            Include CSV attachment (coming soon)
                           </label>
                           <div
                             style={{ fontSize: "12px", color: "var(--muted)" }}
                           >
-                            We email you when scans finish with new issues.
+                            We email you based on the selected trigger.
                           </div>
+                          {notifyLoading && (
+                            <div
+                              style={{
+                                fontSize: "12px",
+                                color: "var(--muted)",
+                              }}
+                            >
+                              Loading notification settings...
+                            </div>
+                          )}
                           {notifyError && (
                             <div
                               style={{
@@ -5116,7 +5333,13 @@ const App: React.FC = () => {
                           >
                             <button
                               onClick={() => void handleSaveNotifications()}
-                              disabled={notifySaving}
+                              disabled={
+                                notifySaving ||
+                                notifyLoading ||
+                                (notifyEnabled &&
+                                  notifyOn !== "never" &&
+                                  !notifyEmail.trim())
+                              }
                               style={{
                                 padding: "6px 10px",
                                 borderRadius: "10px",
@@ -5124,9 +5347,14 @@ const App: React.FC = () => {
                                 background: notifySaving
                                   ? "var(--panel-elev)"
                                   : "var(--panel)",
-                                cursor: notifySaving
-                                  ? "not-allowed"
-                                  : "pointer",
+                                cursor:
+                                  notifySaving ||
+                                  notifyLoading ||
+                                  (notifyEnabled &&
+                                    notifyOn !== "never" &&
+                                    !notifyEmail.trim())
+                                    ? "not-allowed"
+                                    : "pointer",
                                 fontSize: "12px",
                                 fontWeight: 600,
                               }}
@@ -5138,7 +5366,9 @@ const App: React.FC = () => {
                               disabled={
                                 notifyTestSending ||
                                 !notifyEmail.trim() ||
-                                !notifyEnabled
+                                !notifyEnabled ||
+                                notifyOn === "never" ||
+                                notifyLoading
                               }
                               style={{
                                 padding: "6px 10px",
@@ -5150,7 +5380,9 @@ const App: React.FC = () => {
                                 cursor:
                                   notifyTestSending ||
                                   !notifyEmail.trim() ||
-                                  !notifyEnabled
+                                  !notifyEnabled ||
+                                  notifyOn === "never" ||
+                                  notifyLoading
                                     ? "not-allowed"
                                     : "pointer",
                                 fontSize: "12px",
@@ -5289,7 +5521,26 @@ const App: React.FC = () => {
                                   color: "var(--muted)",
                                 }}
                               >
-                                No scans yet.
+                                <div style={{ marginBottom: "6px" }}>
+                                  No scans yet.
+                                </div>
+                                <button
+                                  onClick={handleRunScan}
+                                  disabled={!selectedSiteId || triggeringScan}
+                                  style={{
+                                    padding: "4px 8px",
+                                    borderRadius: "999px",
+                                    border: "1px solid var(--border)",
+                                    background: "var(--panel)",
+                                    fontSize: "11px",
+                                    cursor:
+                                      !selectedSiteId || triggeringScan
+                                        ? "not-allowed"
+                                        : "pointer",
+                                  }}
+                                >
+                                  {triggeringScan ? "Starting..." : "Run scan"}
+                                </button>
                               </td>
                             </tr>
                           )}
@@ -5641,42 +5892,11 @@ const App: React.FC = () => {
                         </div>
                       </div>
                     )}
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        gap: "12px",
-                        flexWrap: "wrap",
-                        marginBottom: "12px",
-                      }}
-                    >
-                      <div
-                        style={{
-                          position: "sticky",
-                          top: 70,
-                          zIndex: 10,
-                          background: "var(--panel)",
-                          padding: "14px 16px",
-                          borderBottom: "1px solid var(--border)",
-                        }}
-                      >
-                        <div
-                          style={{
-                            display: "flex",
-                            justifyContent: "space-between",
-                            gap: "12px",
-                            alignItems: "center",
-                            flexWrap: "wrap",
-                          }}
-                        >
+                    <div style={{ marginBottom: "12px" }}>
+                      <div className="results-summary">
+                        <div className="results-summary__top">
                           {!isSelectedRunInProgress && (
-                            <div
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--muted)",
-                              }}
-                            >
+                            <div className="results-summary__stats">
                               {resultsLoading ? (
                                 <div
                                   className="skeleton"
@@ -5699,23 +5919,27 @@ const App: React.FC = () => {
                             </div>
                           )}
                           {hasActiveFilters && (
-                            <span
-                              style={{
-                                fontSize: "12px",
-                                color: "var(--accent)",
-                              }}
-                            >
+                            <span className="results-summary__chip">
                               Filters active
+                              <button
+                                onClick={() => {
+                                  setStatusFilters({});
+                                  setMinOccurrencesOnly(false);
+                                  setSearchQuery("");
+                                  setActiveTab("all");
+                                  setStatusGroup("all");
+                                  setShowIgnored(false);
+                                }}
+                                className="report-button"
+                                style={{ padding: "2px 8px" }}
+                              >
+                                Clear
+                              </button>
                             </span>
                           )}
-                          <div
-                            style={{
-                              display: "flex",
-                              gap: "8px",
-                              flexWrap: "wrap",
-                              alignItems: "center",
-                            }}
-                          >
+                        </div>
+                        <div className="results-summary__controls">
+                          <div className="results-tabs">
                             {(
                               [
                                 "all",
@@ -5741,14 +5965,7 @@ const App: React.FC = () => {
                               </button>
                             ))}
                           </div>
-                          <div
-                            style={{
-                              display: "flex",
-                              gap: "8px",
-                              flexWrap: "wrap",
-                              alignItems: "center",
-                            }}
-                          >
+                          <div className="results-controls">
                             <div
                               className="filter-dropdown"
                               ref={filterDropdownRef}
@@ -5846,14 +6063,7 @@ const App: React.FC = () => {
                               value={searchQuery}
                               onChange={(e) => setSearchQuery(e.target.value)}
                               placeholder="Search links"
-                              style={{
-                                padding: "6px 8px",
-                                borderRadius: "10px",
-                                border: "1px solid var(--border)",
-                                background: "var(--panel)",
-                                color: "var(--text)",
-                                width: "180px",
-                              }}
+                              style={{ width: "200px" }}
                             />
                             <select
                               value={sortOption}
@@ -5862,18 +6072,10 @@ const App: React.FC = () => {
                                   e.target.value as typeof sortOption,
                                 )
                               }
-                              style={{
-                                padding: "6px 8px",
-                                borderRadius: "10px",
-                                border: "1px solid var(--border)",
-                                background: "var(--panel)",
-                                color: "var(--text)",
-                              }}
                             >
                               <option value="severity">Severity</option>
-                              <option value="occ_desc">Occurrences</option>
-                              <option value="status_asc">Status code ↑</option>
-                              <option value="status_desc">Status code ↓</option>
+                              <option value="occ_desc">Most occurrences</option>
+                              <option value="status_desc">Status code</option>
                               <option value="recent">Recently seen</option>
                             </select>
                             {isSelectedRunInProgress && (
@@ -6140,8 +6342,31 @@ const App: React.FC = () => {
                                         color: "var(--muted)",
                                       }}
                                     >
-                                      No results yet. Run a scan to populate
-                                      this list.
+                                      <div style={{ marginBottom: "8px" }}>
+                                        No results yet. Run a scan to populate
+                                        this list.
+                                      </div>
+                                      <button
+                                        onClick={handleRunScan}
+                                        disabled={
+                                          !selectedSiteId || triggeringScan
+                                        }
+                                        style={{
+                                          padding: "6px 10px",
+                                          borderRadius: "999px",
+                                          border: "1px solid var(--border)",
+                                          background: "var(--panel)",
+                                          fontSize: "12px",
+                                          cursor:
+                                            !selectedSiteId || triggeringScan
+                                              ? "not-allowed"
+                                              : "pointer",
+                                        }}
+                                      >
+                                        {triggeringScan
+                                          ? "Starting..."
+                                          : "Run scan"}
+                                      </button>
                                     </div>
                                   )}
                                 {renderLinkRows(filteredResults, (row) => {
@@ -6302,9 +6527,11 @@ const App: React.FC = () => {
                                           className="expand-panel"
                                           style={{
                                             padding: "10px 12px",
-                                            borderTop:
-                                              "1px solid var(--border)",
+                                            margin: "0 12px 12px 34px",
+                                            border: "1px solid var(--border)",
+                                            borderRadius: "10px",
                                             background: "var(--panel)",
+                                            boxShadow: "var(--soft-shadow)",
                                           }}
                                         >
                                           {ignoredOccLoading[row.id] && (
@@ -6739,17 +6966,6 @@ const App: React.FC = () => {
                               >
                                 {selectedOccurrencesTotal} total
                               </div>
-                              {selectedOccurrencesLoading &&
-                                selectedOccurrences.length === 0 && (
-                                  <div
-                                    style={{
-                                      fontSize: "12px",
-                                      color: "var(--muted)",
-                                    }}
-                                  >
-                                    Loading occurrences…
-                                  </div>
-                                )}
                               {selectedOccurrencesError && (
                                 <div
                                   style={{
@@ -6772,6 +6988,13 @@ const App: React.FC = () => {
                                   </div>
                                 )}
                               <div className="drawer-list">
+                                {showOccurrencesSkeleton &&
+                                  Array.from({ length: 3 }).map((_, idx) => (
+                                    <div
+                                      key={`occ-skeleton-${idx}`}
+                                      className="skeleton skeleton--occ"
+                                    />
+                                  ))}
                                 {selectedOccurrences.map((occ) => (
                                   <div key={occ.id} className="drawer-row">
                                     <a
@@ -6843,6 +7066,8 @@ const App: React.FC = () => {
               >
                 <div
                   className="modal"
+                  role="dialog"
+                  aria-modal="true"
                   onClick={(event) => event.stopPropagation()}
                 >
                   <div
@@ -7045,6 +7270,8 @@ const App: React.FC = () => {
               >
                 <div
                   className="modal"
+                  role="dialog"
+                  aria-modal="true"
                   onClick={(event) => event.stopPropagation()}
                 >
                   <div
@@ -7144,6 +7371,8 @@ const App: React.FC = () => {
               >
                 <div
                   className="modal"
+                  role="dialog"
+                  aria-modal="true"
                   onClick={(event) => event.stopPropagation()}
                 >
                   <div
@@ -7187,6 +7416,8 @@ const App: React.FC = () => {
               >
                 <div
                   className="modal"
+                  role="dialog"
+                  aria-modal="true"
                   onClick={(event) => event.stopPropagation()}
                 >
                   <div

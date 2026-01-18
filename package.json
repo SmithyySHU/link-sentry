@@ -9,6 +9,7 @@
     "dev:crawler": "npm run -w @link-sentry/crawler dev",
     "dev:db": "npm run -w @link-sentry/db dev",
     "dev:api": "npm run -w @link-sentry/api dev",
+    "dev:worker": "npm run -w @link-sentry/worker dev",
     "dev:web": "npm run -w @link-sentry/web dev",
     "demo:latest-scan": "npm run -w @link-sentry/db demo:latest-scan",
     "demo:site-history": "npm run -w @link-sentry/db demo:site-history --",

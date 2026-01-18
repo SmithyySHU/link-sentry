@@ -10,8 +10,12 @@ import {
   getLatestScanForSite,
   getJobForScanRun,
   getScanRunById,
+  getSiteById,
+  hasActiveJobForSite,
   markSiteScheduled,
+  requeueExpiredScanJobs,
   setScanRunStatus,
+  setScanJobRunId,
 } from "@link-sentry/db";
 import { runScanForSite } from "../../../packages/crawler/src/scanService.js";
 
@@ -19,38 +23,84 @@ const workerId = `${os.hostname()}-${process.pid}`;
 const IDLE_WAIT_MS = 1200;
 const SCHEDULE_TICK_MS = 60000;
 const SCHEDULE_COOLDOWN_MS = 60000;
+const CLAIM_LEASE_SECONDS = 120;
+const REAPER_TICK_MS = 120000;
 const API_BASE_URL = process.env.WORKER_API_BASE || "http://localhost:3001";
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function logJobEvent(
+  event: string,
+  job: { id: string; site_id: string; scan_run_id: string | null },
+  details?: string,
+) {
+  const suffix = details ? ` ${details}` : "";
+  console.log(
+    `[worker ${workerId}] ${event} job=${job.id} site=${job.site_id} run=${job.scan_run_id ?? "none"}${suffix}`,
+  );
+}
+
 async function processJob() {
-  const job = await claimNextScanJob({ workerId });
+  const job = await claimNextScanJob({
+    workerId,
+    leaseSeconds: CLAIM_LEASE_SECONDS,
+  });
   if (!job) return false;
 
-  const run = await getScanRunById(job.scan_run_id);
+  logJobEvent("claimed", job, `attempts=${job.attempts}/${job.max_attempts}`);
+
+  let scanRunId = job.scan_run_id;
+  let run = scanRunId ? await getScanRunById(scanRunId) : null;
   if (!run) {
-    await failScanJob(job.id, "scan_run_not_found");
+    const site = await getSiteById(job.site_id);
+    if (!site) {
+      const failedJob = await failScanJob(job.id, "site_not_found");
+      if (failedJob) {
+        logJobEvent("failed", failedJob, "error=site_not_found");
+      }
+      return true;
+    }
+    scanRunId = await createScanRun(site.id, site.url);
+    await setScanJobRunId(job.id, scanRunId);
+    run = await getScanRunById(scanRunId);
+  }
+
+  if (!run) {
+    const failedJob = await failScanJob(job.id, "scan_run_not_found");
+    if (failedJob) {
+      logJobEvent("failed", failedJob, "error=scan_run_not_found");
+    }
     return true;
   }
 
-  await setScanRunStatus(job.scan_run_id, "in_progress", {
+  await setScanRunStatus(run.id, "in_progress", {
     errorMessage: null,
     clearFinishedAt: true,
   });
+  logJobEvent("started", { ...job, scan_run_id: run.id });
 
   try {
     await runScanForSite(run.site_id, run.start_url, run.id);
     const updatedRun = await getScanRunById(run.id);
     if (updatedRun?.status === "cancelled") {
       await cancelScanJob(job.id);
+      logJobEvent("cancelled", { ...job, scan_run_id: run.id });
       return true;
     }
     if (updatedRun?.status === "failed") {
       const errorMessage = updatedRun.error_message ?? "scan_failed";
-      await failScanJob(job.id, errorMessage);
-      if (job.attempts >= job.max_attempts) {
+      const exhausted = job.attempts >= job.max_attempts;
+      const failedJob = await failScanJob(job.id, errorMessage);
+      if (failedJob) {
+        logJobEvent(
+          exhausted ? "failed" : "requeued",
+          { ...failedJob, scan_run_id: run.id },
+          `error=${errorMessage}`,
+        );
+      }
+      if (exhausted) {
         await setScanRunStatus(run.id, "failed", {
           errorMessage,
           setFinishedAt: true,
@@ -64,14 +114,25 @@ async function processJob() {
       }
       return true;
     }
-    await completeScanJob(job.id);
+    const completedJob = await completeScanJob(job.id);
+    if (completedJob) {
+      logJobEvent("completed", { ...completedJob, scan_run_id: run.id });
+    }
     await notifyScanRun(run.id);
     return true;
   } catch (err: unknown) {
     const errorMessage =
       err instanceof Error ? err.message : "scan_failed_unexpected";
-    await failScanJob(job.id, errorMessage);
-    if (job.attempts >= job.max_attempts) {
+    const exhausted = job.attempts >= job.max_attempts;
+    const failedJob = await failScanJob(job.id, errorMessage);
+    if (failedJob) {
+      logJobEvent(
+        exhausted ? "failed" : "requeued",
+        { ...failedJob, scan_run_id: run.id },
+        `error=${errorMessage}`,
+      );
+    }
+    if (exhausted) {
       await setScanRunStatus(run.id, "failed", {
         errorMessage,
         setFinishedAt: true,
@@ -85,9 +146,9 @@ async function processJob() {
     }
     return true;
   } finally {
-    const latestJob = await getJobForScanRun(job.scan_run_id);
+    const latestJob = await getJobForScanRun(run.id);
     if (latestJob?.status === "cancelled") {
-      await setScanRunStatus(job.scan_run_id, "cancelled", {
+      await setScanRunStatus(run.id, "cancelled", {
         errorMessage: latestJob.last_error ?? null,
         setFinishedAt: true,
       });
@@ -122,6 +183,21 @@ async function runLoop() {
   }
 }
 
+async function reapLoop() {
+  console.log(`[reaper ${workerId}] started`);
+  while (true) {
+    const recovered = await requeueExpiredScanJobs();
+    for (const job of recovered) {
+      logJobEvent(
+        "abandoned-recovered",
+        job,
+        `attempts=${job.attempts}/${job.max_attempts}`,
+      );
+    }
+    await sleep(REAPER_TICK_MS);
+  }
+}
+
 async function schedulerTick() {
   const now = new Date();
   const dueSites = await getDueSites(25);
@@ -142,6 +218,12 @@ async function schedulerTick() {
       latestRun &&
       (latestRun.status === "queued" || latestRun.status === "in_progress")
     ) {
+      skipped += 1;
+      continue;
+    }
+
+    const hasActiveJob = await hasActiveJobForSite(site.id);
+    if (hasActiveJob) {
       skipped += 1;
       continue;
     }
@@ -172,6 +254,10 @@ async function runSchedulerLoop() {
 runLoop().catch((err) => {
   console.error(`[worker ${workerId}] fatal`, err);
   process.exit(1);
+});
+
+reapLoop().catch((err) => {
+  console.error(`[reaper ${workerId}] fatal`, err);
 });
 
 runSchedulerLoop().catch((err) => {

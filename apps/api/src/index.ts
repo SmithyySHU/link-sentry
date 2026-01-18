@@ -83,6 +83,7 @@ const EXPORT_SORT_OPTIONS = new Set([
   "recent",
 ]);
 const SCHEDULE_FREQUENCIES = new Set(["daily", "weekly"]);
+const NOTIFY_ON_OPTIONS = new Set(["always", "issues", "never"]);
 const EMAIL_TEST_TO = process.env.EMAIL_TEST_TO;
 
 function isValidTimeUtc(value: string) {
@@ -291,7 +292,10 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
   }
 });
 
-app.get("/sites/:siteId/notifications", async (req, res) => {
+async function handleGetNotificationSettings(
+  req: express.Request,
+  res: express.Response,
+) {
   const siteId = req.params.siteId;
   try {
     const settings = await getSiteNotificationSettings(siteId);
@@ -300,68 +304,106 @@ app.get("/sites/:siteId/notifications", async (req, res) => {
     }
     res.json({ siteId, ...settings });
   } catch (err: unknown) {
-    console.error("Error in GET /sites/:siteId/notifications", err);
-    sendInternalError(res, "Failed to fetch notifications", err);
+    console.error("Error in GET /sites/:siteId/notification-settings", err);
+    sendInternalError(res, "Failed to fetch notification settings", err);
   }
-});
+}
 
-app.put("/sites/:siteId/notifications", async (req, res) => {
+async function handlePatchNotificationSettings(
+  req: express.Request,
+  res: express.Response,
+) {
   const siteId = req.params.siteId;
-  const { enabled, email, onlyOnChange, includeBroken, includeBlocked } =
-    req.body ?? {};
+  const { enabled, email, notifyOn, includeCsv } = req.body ?? {};
 
-  if (typeof enabled !== "boolean") {
-    return sendApiError(res, 400, "invalid_enabled", "enabled must be boolean");
+  const patch: {
+    notifyEnabled?: boolean;
+    notifyEmail?: string | null;
+    notifyOn?: "always" | "issues" | "never";
+    notifyIncludeCsv?: boolean;
+  } = {};
+
+  if (enabled !== undefined) {
+    if (typeof enabled !== "boolean") {
+      return sendApiError(
+        res,
+        400,
+        "invalid_enabled",
+        "enabled must be boolean",
+      );
+    }
+    patch.notifyEnabled = enabled;
   }
-  if (email != null && typeof email !== "string") {
-    return sendApiError(res, 400, "invalid_email", "email must be a string");
+  if (email !== undefined) {
+    if (email != null && typeof email !== "string") {
+      return sendApiError(res, 400, "invalid_email", "email must be a string");
+    }
+    if (email && !isValidEmail(email)) {
+      return sendApiError(res, 400, "invalid_email", "email is invalid");
+    }
+    patch.notifyEmail = email ?? null;
   }
-  if (email && !isValidEmail(email)) {
-    return sendApiError(res, 400, "invalid_email", "email is invalid");
+  if (notifyOn !== undefined) {
+    if (typeof notifyOn !== "string" || !NOTIFY_ON_OPTIONS.has(notifyOn)) {
+      return sendApiError(
+        res,
+        400,
+        "invalid_notify_on",
+        "notifyOn must be always, issues, or never",
+      );
+    }
+    patch.notifyOn = notifyOn as "always" | "issues" | "never";
   }
-  if (typeof onlyOnChange !== "boolean") {
-    return sendApiError(
-      res,
-      400,
-      "invalid_only_on_change",
-      "onlyOnChange must be boolean",
-    );
+  if (includeCsv !== undefined) {
+    if (typeof includeCsv !== "boolean") {
+      return sendApiError(
+        res,
+        400,
+        "invalid_include_csv",
+        "includeCsv must be boolean",
+      );
+    }
+    patch.notifyIncludeCsv = includeCsv;
   }
-  if (typeof includeBroken !== "boolean") {
-    return sendApiError(
-      res,
-      400,
-      "invalid_include_broken",
-      "includeBroken must be boolean",
-    );
-  }
-  if (typeof includeBlocked !== "boolean") {
-    return sendApiError(
-      res,
-      400,
-      "invalid_include_blocked",
-      "includeBlocked must be boolean",
-    );
+
+  if (Object.keys(patch).length === 0) {
+    return sendApiError(res, 400, "empty_patch", "No fields to update");
   }
 
   try {
-    const existing = await getSiteNotificationSettings(siteId);
-    if (!existing) {
-      return sendApiError(res, 404, "site_not_found", "Site not found");
-    }
-    const updated = await updateSiteNotificationSettings(siteId, {
-      notifyEnabled: enabled,
-      notifyEmail: email ?? null,
-      notifyOnlyOnChange: onlyOnChange,
-      notifyIncludeBlocked: includeBlocked,
-      notifyIncludeBroken: includeBroken,
-      lastNotifiedScanRunId: existing.lastNotifiedScanRunId,
-    });
+    const updated = await updateSiteNotificationSettings(siteId, patch);
     res.json({ siteId, ...updated });
   } catch (err: unknown) {
-    console.error("Error in PUT /sites/:siteId/notifications", err);
-    sendInternalError(res, "Failed to update notifications", err);
+    if (err instanceof Error && err.message === "site_not_found") {
+      return sendApiError(res, 404, "site_not_found", "Site not found");
+    }
+    if (err instanceof Error && err.message === "invalid_notify_email") {
+      return sendApiError(
+        res,
+        400,
+        "invalid_notify_email",
+        "notify_email is required when notifications are enabled and notifyOn is not never",
+      );
+    }
+    console.error("Error in PATCH /sites/:siteId/notification-settings", err);
+    sendInternalError(res, "Failed to update notification settings", err);
   }
+}
+
+app.get("/sites/:siteId/notification-settings", handleGetNotificationSettings);
+app.patch(
+  "/sites/:siteId/notification-settings",
+  handlePatchNotificationSettings,
+);
+
+// Backwards-compatible routes for older clients
+app.get("/sites/:siteId/notifications", handleGetNotificationSettings);
+
+app.put("/sites/:siteId/notifications", async (req, res) => {
+  const { enabled, email, onlyOnChange } = req.body ?? {};
+  const notifyOn = onlyOnChange === false ? "always" : "issues";
+  req.body = { enabled, email, notifyOn };
+  await handlePatchNotificationSettings(req, res);
 });
 
 app.post("/sites/:siteId/notifications/test", async (req, res) => {
@@ -616,7 +658,6 @@ app.post("/scan-runs/:scanRunId/retry", async (req, res) => {
     const jobId = await enqueueScanJob({
       scanRunId,
       siteId: run.site_id,
-      priority: 1,
     });
     await setScanRunStatus(scanRunId, "queued", {
       errorMessage: null,

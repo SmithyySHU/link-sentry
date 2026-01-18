@@ -62,6 +62,10 @@ export const ScanProgressBar: React.FC<ScanProgressProps> = ({
         : status === "failed" || status === "cancelled"
           ? "Scan stopped"
           : "Scanning…";
+  const progressLabel =
+    status === "completed" || status === "failed" || status === "cancelled"
+      ? `Checked ${checkedLinks} / ${totalLinks || "?"}`
+      : `Scanning… ${checkedLinks} / ${totalLinks || "?"} links checked`;
 
   return (
     <div className={`scan-progress ${stateClass}`}>
@@ -69,9 +73,7 @@ export const ScanProgressBar: React.FC<ScanProgressProps> = ({
         <div>
           <div className="scan-progress__title">{title}</div>
           <div className="scan-progress__subtitle">
-            <span>
-              Checked {checkedLinks} / {totalLinks || "?"}
-            </span>
+            <span>{progressLabel}</span>
             <span>Broken {brokenLinks}</span>
             <span>Blocked {blockedLinks}</span>
             <span>No response {noResponseLinks}</span>

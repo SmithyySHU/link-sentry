@@ -3,10 +3,8 @@ import { ensureConnected } from "./client.js";
 export type NotificationSettings = {
   notifyEnabled: boolean;
   notifyEmail: string | null;
-  notifyOnlyOnChange: boolean;
-  notifyIncludeBlocked: boolean;
-  notifyIncludeBroken: boolean;
-  lastNotifiedScanRunId: string | null;
+  notifyOn: "always" | "issues" | "never";
+  notifyIncludeCsv: boolean;
 };
 
 export type NotificationEventKind = "scan_completed" | "scan_failed" | "test";
@@ -30,10 +28,8 @@ export type LinkDeltaRow = {
 type SiteNotificationRow = {
   notify_enabled: boolean;
   notify_email: string | null;
-  notify_only_on_change: boolean;
-  notify_include_blocked: boolean;
-  notify_include_broken: boolean;
-  last_notified_scan_run_id: string | null;
+  notify_on: "always" | "issues" | "never";
+  notify_include_csv: boolean;
 };
 
 type LinkCountRow = {
@@ -49,10 +45,8 @@ export async function getSiteNotificationSettings(
     `
       SELECT notify_enabled,
              notify_email,
-             notify_only_on_change,
-             notify_include_blocked,
-             notify_include_broken,
-             last_notified_scan_run_id
+             notify_on,
+             notify_include_csv
       FROM sites
       WHERE id = $1
     `,
@@ -63,43 +57,45 @@ export async function getSiteNotificationSettings(
   return {
     notifyEnabled: row.notify_enabled,
     notifyEmail: row.notify_email,
-    notifyOnlyOnChange: row.notify_only_on_change,
-    notifyIncludeBlocked: row.notify_include_blocked,
-    notifyIncludeBroken: row.notify_include_broken,
-    lastNotifiedScanRunId: row.last_notified_scan_run_id,
+    notifyOn: row.notify_on,
+    notifyIncludeCsv: row.notify_include_csv,
   };
 }
 
 export async function updateSiteNotificationSettings(
   siteId: string,
-  fields: NotificationSettings,
+  fields: Partial<NotificationSettings>,
 ): Promise<NotificationSettings> {
+  const existing = await getSiteNotificationSettings(siteId);
+  if (!existing) throw new Error("site_not_found");
+  const next: NotificationSettings = { ...existing, ...fields };
+  if (
+    next.notifyEnabled &&
+    next.notifyOn !== "never" &&
+    (!next.notifyEmail || !isValidEmail(next.notifyEmail))
+  ) {
+    throw new Error("invalid_notify_email");
+  }
   const client = await ensureConnected();
   const res = await client.query<SiteNotificationRow>(
     `
       UPDATE sites
       SET notify_enabled = $2,
           notify_email = $3,
-          notify_only_on_change = $4,
-          notify_include_blocked = $5,
-          notify_include_broken = $6,
-          last_notified_scan_run_id = $7
+          notify_on = $4,
+          notify_include_csv = $5
       WHERE id = $1
       RETURNING notify_enabled,
                 notify_email,
-                notify_only_on_change,
-                notify_include_blocked,
-                notify_include_broken,
-                last_notified_scan_run_id
+                notify_on,
+                notify_include_csv
     `,
     [
       siteId,
-      fields.notifyEnabled,
-      fields.notifyEmail,
-      fields.notifyOnlyOnChange,
-      fields.notifyIncludeBlocked,
-      fields.notifyIncludeBroken,
-      fields.lastNotifiedScanRunId,
+      next.notifyEnabled,
+      next.notifyEmail,
+      next.notifyOn,
+      next.notifyIncludeCsv,
     ],
   );
   const row = res.rows[0];
@@ -107,11 +103,13 @@ export async function updateSiteNotificationSettings(
   return {
     notifyEnabled: row.notify_enabled,
     notifyEmail: row.notify_email,
-    notifyOnlyOnChange: row.notify_only_on_change,
-    notifyIncludeBlocked: row.notify_include_blocked,
-    notifyIncludeBroken: row.notify_include_broken,
-    lastNotifiedScanRunId: row.last_notified_scan_run_id,
+    notifyOn: row.notify_on,
+    notifyIncludeCsv: row.notify_include_csv,
   };
+}
+
+function isValidEmail(value: string) {
+  return /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(value);
 }
 
 export async function recordNotificationEvent(
@@ -132,6 +130,19 @@ export async function recordNotificationEvent(
       input.subject,
       input.payload,
     ],
+  );
+}
+
+export async function markScanRunNotified(scanRunId: string): Promise<void> {
+  const client = await ensureConnected();
+  await client.query(
+    `
+      UPDATE scan_runs
+      SET notified_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $1
+    `,
+    [scanRunId],
   );
 }
 

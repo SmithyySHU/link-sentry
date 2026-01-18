@@ -13,6 +13,7 @@ export interface ScanRunRow {
   status: ScanStatus;
   started_at: Date;
   finished_at: Date | null;
+  notified_at: Date | null;
   error_message: string | null;
   updated_at: Date;
   start_url: string;
@@ -34,6 +35,7 @@ export async function getLatestScanForSite(
         status,
         started_at,
         finished_at,
+        notified_at,
         error_message,
         updated_at,
         start_url,
@@ -69,6 +71,7 @@ export async function getRecentScansForSite(
         status,
         started_at,
         finished_at,
+        notified_at,
         error_message,
         updated_at,
         start_url,
@@ -99,6 +102,7 @@ export async function getScanRunById(
         status,
         started_at,
         finished_at,
+        notified_at,
         error_message,
         updated_at,
         start_url,
@@ -113,4 +117,17 @@ export async function getScanRunById(
   );
 
   return res.rows[0] ?? null;
+}
+
+export async function setScanRunNotified(scanRunId: string): Promise<void> {
+  const client = await ensureConnected();
+  await client.query(
+    `
+      UPDATE scan_runs
+      SET notified_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $1
+    `,
+    [scanRunId],
+  );
 }

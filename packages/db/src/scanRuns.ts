@@ -20,6 +20,7 @@ export interface ScanRunRow {
   status: ScanStatus;
   started_at: Date;
   finished_at: Date | null;
+  notified_at: Date | null;
   error_message: string | null;
   updated_at: Date;
   start_url: string;
@@ -180,6 +181,7 @@ export async function getLatestScanForSite(
       status,
       started_at,
       finished_at,
+      notified_at,
       error_message,
       updated_at,
       start_url,

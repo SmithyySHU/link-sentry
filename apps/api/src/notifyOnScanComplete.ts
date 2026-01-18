@@ -6,8 +6,9 @@ import {
   getSiteById,
   getSiteNotificationSettings,
   hasNotificationEvent,
+  getTimeoutCountForRun,
+  markScanRunNotified,
   recordNotificationEvent,
-  setLastNotifiedScanRunId,
 } from "@link-sentry/db";
 import { sendEmail } from "./email";
 
@@ -39,12 +40,15 @@ function renderLinks(
 export async function notifyIfNeeded(scanRunId: string): Promise<void> {
   const run = await getScanRunById(scanRunId);
   if (!run) return;
+  if (run.notified_at) return;
 
   const site = await getSiteById(run.site_id);
   if (!site) return;
 
   const settings = await getSiteNotificationSettings(run.site_id);
-  if (!settings || !settings.notifyEnabled || !settings.notifyEmail) return;
+  if (!settings || !settings.notifyEnabled) return;
+  if (settings.notifyOn === "never") return;
+  if (!settings.notifyEmail) return;
 
   const toEmail = settings.notifyEmail;
   const alreadySent = await hasNotificationEvent({
@@ -71,42 +75,36 @@ export async function notifyIfNeeded(scanRunId: string): Promise<void> {
       subject,
       payload: { status: run.status, error: run.error_message },
     });
+    await markScanRunNotified(run.id);
     return;
   }
 
   if (run.status !== "completed") return;
 
-  const previousRunId =
-    settings.lastNotifiedScanRunId ||
-    (await getPreviousCompletedRunId(run.site_id, run.id));
+  const previousRunId = await getPreviousCompletedRunId(run.site_id, run.id);
   const deltas = await getNewLinksSinceLastNotified(run.id, previousRunId, 50);
   const counts = await getLinkCountsForRun(run.id);
+  const timeoutCount = await getTimeoutCountForRun(run.id);
 
   const newBrokenCount = deltas.newBroken.length + deltas.newNoResponse.length;
   const newBlockedCount = deltas.newBlocked.length;
 
-  const includeBroken = settings.notifyIncludeBroken;
-  const includeBlocked = settings.notifyIncludeBlocked;
-  const hasChanges =
-    (includeBroken && newBrokenCount > 0) ||
-    (includeBlocked && newBlockedCount > 0);
+  const issueCount =
+    counts.brokenCount + counts.blockedCount + counts.noResponseCount;
+  if (settings.notifyOn === "issues" && issueCount === 0) return;
 
-  if (settings.notifyOnlyOnChange && !hasChanges) return;
-
-  const subject = `Link-Sentry: ${site.url} — ${newBrokenCount} new broken, ${newBlockedCount} new blocked`;
-  const brokenRows = includeBroken
-    ? [...deltas.newBroken, ...deltas.newNoResponse]
-    : [];
-  const blockedRows = includeBlocked ? deltas.newBlocked : [];
+  const subject = `Link-Sentry: ${site.url} — ${counts.brokenCount} broken, ${counts.blockedCount} blocked, ${counts.noResponseCount} no response`;
+  const brokenRows = [...deltas.newBroken, ...deltas.newNoResponse];
+  const blockedRows = deltas.newBlocked;
 
   const html = `
     <p><strong>Scan complete</strong> for ${site.url}</p>
     <p>Started: ${run.started_at.toISOString()}</p>
     <p>Totals: ${counts.brokenCount} broken, ${counts.blockedCount} blocked, ${
       counts.noResponseCount
-    } no response</p>
-    ${renderLinks("New broken / no response", brokenRows)}
-    ${renderLinks("New blocked", blockedRows)}
+    } no response (${timeoutCount} timed out)</p>
+    ${renderLinks("New broken / no response since last scan", brokenRows)}
+    ${renderLinks("New blocked since last scan", blockedRows)}
     <p><a href="${APP_URL}">View in dashboard</a></p>
   `;
 
@@ -120,11 +118,12 @@ export async function notifyIfNeeded(scanRunId: string): Promise<void> {
     payload: {
       newBroken: newBrokenCount,
       newBlocked: newBlockedCount,
+      timeoutCount,
       totals: counts,
       previousRunId,
     },
   });
-  await setLastNotifiedScanRunId(run.site_id, run.id);
+  await markScanRunNotified(run.id);
 }
 
 export async function sendTestEmail(
