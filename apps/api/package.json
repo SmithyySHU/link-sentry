@@ -1,5 +1,5 @@
 {
-  "name": "@link-sentry/api",
+  "name": "@scanlark/api",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -8,8 +8,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@link-sentry/crawler": "*",
-    "@link-sentry/db": "*",
+    "@scanlark/crawler": "*",
+    "@scanlark/db": "*",
     "cors": "^2.8.5",
     "express": "^4.21.2",
     "express-rate-limit": "^7.4.0",

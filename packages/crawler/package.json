@@ -1,5 +1,5 @@
 {
-  "name": "@link-sentry/crawler",
+  "name": "@scanlark/crawler",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -9,7 +9,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@link-sentry/db": "*",
+    "@scanlark/db": "*",
     "cheerio": "^1.1.2"
   }
 }

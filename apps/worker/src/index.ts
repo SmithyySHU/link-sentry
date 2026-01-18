@@ -17,7 +17,7 @@ import {
   requeueExpiredScanJobs,
   setScanRunStatus,
   setScanJobRunId,
-} from "@link-sentry/db";
+} from "@scanlark/db";
 import { runScanForSite } from "../../../packages/crawler/src/scanService";
 
 dotenv.config({ path: new URL("../../../.env", import.meta.url) });

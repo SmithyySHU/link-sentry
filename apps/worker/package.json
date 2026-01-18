@@ -1,5 +1,5 @@
 {
-  "name": "@link-sentry/worker",
+  "name": "@scanlark/worker",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -11,8 +11,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@link-sentry/db": "*",
-    "@link-sentry/crawler": "*",
+    "@scanlark/db": "*",
+    "@scanlark/crawler": "*",
     "dotenv": "^16.4.5"
   },
   "devDependencies": {

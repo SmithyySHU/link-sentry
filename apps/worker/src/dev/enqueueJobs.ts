@@ -1,4 +1,4 @@
-import { enqueueScanJob } from "@link-sentry/db";
+import { enqueueScanJob } from "@scanlark/db";
 
 const siteId = process.env.SITE_ID;
 const countRaw = process.env.JOBS_COUNT ?? "5";

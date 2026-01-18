@@ -7,7 +7,7 @@ import type {
   IgnoreRuleType,
   LinkClassification,
   ScanLinkOccurrenceRow,
-} from "@link-sentry/db";
+} from "@scanlark/db";
 import {
   applyIgnoreRulesForScanRun,
   cancelScanJob,
@@ -54,7 +54,7 @@ import {
   updateSiteScheduleForUser,
   updateScanLinkAfterRecheck,
   upsertIgnoredLink,
-} from "@link-sentry/db";
+} from "@scanlark/db";
 import validateLink from "../../../packages/crawler/src/validateLink";
 import { classifyStatus } from "../../../packages/crawler/src/classifyStatus";
 import { mountScanRunEvents } from "./routes/scanRunEvents";

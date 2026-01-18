@@ -3,7 +3,7 @@ import extractLinks from "./extractLinks";
 import validateLink from "./validateLink";
 import { classifyStatus } from "./classifyStatus";
 import { normaliseLink } from "./normaliseLink";
-import type { IgnoreRule } from "@link-sentry/db";
+import type { IgnoreRule } from "@scanlark/db";
 import {
   completeScanRun,
   createScanRun,
@@ -18,7 +18,7 @@ import {
   updateScanRunProgress,
   upsertIgnoredLink,
   upsertScanLink,
-} from "@link-sentry/db";
+} from "@scanlark/db";
 
 export interface ScanExecutionSummary {
   scanRunId: string;

@@ -1,5 +1,5 @@
 import { Application, Request, Response } from "express";
-import { getScanRunByIdForUser } from "@link-sentry/db";
+import { getScanRunByIdForUser } from "@scanlark/db";
 import { serializeScanRun } from "../serializers";
 
 const WEB_ORIGIN = process.env.WEB_ORIGIN || "http://localhost:5173";

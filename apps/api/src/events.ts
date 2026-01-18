@@ -1,6 +1,6 @@
 import type { Application, Request, Response } from "express";
 import { Client } from "pg";
-import { SCAN_EVENT_CHANNEL } from "@link-sentry/db";
+import { SCAN_EVENT_CHANNEL } from "@scanlark/db";
 
 type EventPayload = {
   type: string;

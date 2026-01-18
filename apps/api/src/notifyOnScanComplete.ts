@@ -9,7 +9,7 @@ import {
   getTimeoutCountForRunForUser,
   markScanRunNotified,
   recordNotificationEvent,
-} from "@link-sentry/db";
+} from "@scanlark/db";
 import { sendEmail } from "./email";
 
 const APP_URL = process.env.APP_URL || "http://localhost:5173";

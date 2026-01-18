@@ -5,7 +5,7 @@ import {
   createUser,
   getUserByEmail,
   getUserById,
-} from "@link-sentry/db";
+} from "@scanlark/db";
 import { getSessionUserId } from "./auth";
 
 type AuthUser = {

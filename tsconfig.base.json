@@ -2,9 +2,9 @@
   "compilerOptions": {
     "baseUrl": ".",
     "paths": {
-      "@link-sentry/db": ["packages/db/src/index.ts"],
-      "@link-sentry/crawler": ["packages/crawler/src/index.ts"],
-      "@link-sentry/*": ["packages/*/src"]
+      "@scanlark/db": ["packages/db/src/index.ts"],
+      "@scanlark/crawler": ["packages/crawler/src/index.ts"],
+      "@scanlark/*": ["packages/*/src"]
     }
   }
 }

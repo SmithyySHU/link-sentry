@@ -1,4 +1,4 @@
-import type { ScanRunHistoryRow, ScanRunRow } from "@link-sentry/db";
+import type { ScanRunHistoryRow, ScanRunRow } from "@scanlark/db";
 
 type ScanRunInput = ScanRunRow | ScanRunHistoryRow;
 

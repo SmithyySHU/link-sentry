@@ -1,7 +1,7 @@
 import express from "express";
 import type { Request, Response } from "express";
 import rateLimit from "express-rate-limit";
-import { createUser, verifyUser } from "@link-sentry/db";
+import { createUser, verifyUser } from "@scanlark/db";
 import { clearSession, setSession } from "../auth";
 
 function isValidEmail(value: string) {
