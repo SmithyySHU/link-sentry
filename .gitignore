@@ -33,3 +33,7 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.swp
+
+# Local-only rebrand notes + migrations
+REBRAND_NOTES.md
+packages/db/migrations/
