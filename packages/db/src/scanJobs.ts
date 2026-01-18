@@ -1,4 +1,4 @@
-import { ensureConnected } from "./client.js";
+import { ensureConnected } from "./client";
 
 export type ScanJobStatus =
   | "queued"

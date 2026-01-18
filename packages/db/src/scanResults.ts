@@ -1,5 +1,5 @@
-import { ensureConnected } from "./client.js";
-import type { LinkClassification } from "./scanRuns.js";
+import { ensureConnected } from "./client";
+import type { LinkClassification } from "./scanRuns";
 
 export interface ScanResultRow {
   id: string;
@@ -125,6 +125,74 @@ export async function getResultsForScanRun(
   };
 }
 
+export async function getResultsForScanRunForUser(
+  userId: string,
+  scanRunId: string,
+  options?: {
+    limit?: number;
+    offset?: number;
+    classification?: LinkClassification;
+  },
+): Promise<PaginatedResults> {
+  const client = await ensureConnected();
+
+  const limit = options?.limit ?? 200;
+  const offset = options?.offset ?? 0;
+  const classification = options?.classification;
+
+  let whereClause =
+    "WHERE r.scan_run_id = $1 AND s.user_id = $2";
+  const params: Array<string | number> = [scanRunId, userId];
+
+  if (classification) {
+    whereClause += " AND r.classification = $3";
+    params.push(classification);
+  }
+
+  const countRes = await client.query<{ count: string }>(
+    `
+      SELECT COUNT(*) as count
+      FROM scan_results r
+      JOIN scan_runs sr ON sr.id = r.scan_run_id
+      JOIN sites s ON s.id = sr.site_id
+      ${whereClause}
+    `,
+    params,
+  );
+
+  const totalMatching = Number(countRes.rows[0]?.count ?? 0);
+
+  const paramIndex = params.length + 1;
+  const res = await client.query<ScanResultRow>(
+    `
+      SELECT
+        r.id,
+        r.scan_run_id,
+        r.source_page,
+        r.link_url,
+        r.status_code,
+        r.classification,
+        r.error_message,
+        r.created_at
+      FROM scan_results r
+      JOIN scan_runs sr ON sr.id = r.scan_run_id
+      JOIN sites s ON s.id = sr.site_id
+      ${whereClause}
+      ORDER BY
+        (r.classification <> 'ok') DESC,
+        r.created_at DESC
+      LIMIT $${paramIndex} OFFSET $${paramIndex + 1}
+    `,
+    [...params, limit, offset],
+  );
+
+  return {
+    results: res.rows,
+    countReturned: res.rows.length,
+    totalMatching,
+  };
+}
+
 export interface ResultsSummary {
   classification: LinkClassification;
   status_code: number | null;
@@ -148,6 +216,34 @@ export async function getResultsSummaryForScanRun(
       ORDER BY classification, status_code
     `,
     [scanRunId],
+  );
+
+  return res.rows.map((row) => ({
+    ...row,
+    count: Number(row.count),
+  }));
+}
+
+export async function getResultsSummaryForScanRunForUser(
+  userId: string,
+  scanRunId: string,
+): Promise<ResultsSummary[]> {
+  const client = await ensureConnected();
+
+  const res = await client.query<ResultsSummary>(
+    `
+      SELECT
+        r.classification,
+        r.status_code,
+        COUNT(*) as count
+      FROM scan_results r
+      JOIN scan_runs sr ON sr.id = r.scan_run_id
+      JOIN sites s ON s.id = sr.site_id
+      WHERE r.scan_run_id = $1 AND s.user_id = $2
+      GROUP BY r.classification, r.status_code
+      ORDER BY r.classification, r.status_code
+    `,
+    [scanRunId, userId],
   );
 
   return res.rows.map((row) => ({

@@ -1,8 +1,8 @@
-import fetchUrl from "./fetchUrl.js";
-import extractLinks from "./extractLinks.js";
-import validateLink from "./validateLink.js";
-import { classifyStatus } from "./classifyStatus.js";
-import { normaliseLink } from "./normaliseLink.js";
+import fetchUrl from "./fetchUrl";
+import extractLinks from "./extractLinks";
+import validateLink from "./validateLink";
+import { classifyStatus } from "./classifyStatus";
+import { normaliseLink } from "./normaliseLink";
 import type { IgnoreRule } from "@link-sentry/db";
 import {
   completeScanRun,

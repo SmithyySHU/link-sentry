@@ -1,27 +1,37 @@
 export {
   createSite,
+  createSiteForUser,
   deleteSite,
+  deleteSiteForUser,
   getSiteById,
+  getSiteByIdForUser,
   getSitesForUser,
-} from "./sites.js";
-export type { DbSiteRow } from "./sites.js";
+  listSitesForUser,
+  backfillSitesUserId,
+} from "./sites";
+export type { DbSiteRow } from "./sites";
 
 export {
   computeNextScheduledAt,
   getDueSites,
   getSiteSchedule,
+  getSiteScheduleForUser,
   markSiteScheduled,
   updateSiteSchedule,
-} from "./siteSchedule.js";
-export type { SiteScheduleFields, ScheduleFrequency } from "./siteSchedule.js";
+  updateSiteScheduleForUser,
+} from "./siteSchedule";
+export type { SiteScheduleFields, ScheduleFrequency } from "./siteSchedule";
 
 export {
   getLatestScanForSite,
+  getLatestScanForSiteForUser,
   getRecentScansForSite,
+  getRecentScansForSiteForUser,
   getScanRunById,
+  getScanRunByIdForUser,
   setScanRunNotified,
-} from "./scans.js";
-export type { ScanRunRow, ScanStatus } from "./scans.js";
+} from "./scans";
+export type { ScanRunRow, ScanStatus } from "./scans";
 
 export {
   cancelScanRun,
@@ -31,41 +41,51 @@ export {
   touchScanRun,
   setScanRunStatus,
   updateScanRunProgress,
-} from "./scanRuns.js";
-export type { LinkClassification, ScanRunSummary } from "./scanRuns.js";
+} from "./scanRuns";
+export type { LinkClassification, ScanRunSummary } from "./scanRuns";
 
 export {
   getDiffBetweenRuns,
+  getDiffBetweenRunsForUser,
   getRecentScanRunsForSite,
-} from "./scanRunsHistory.js";
-export type {
-  ScanLinkMinimalRow,
-  ScanRunHistoryRow,
-} from "./scanRunsHistory.js";
+  getRecentScanRunsForSiteForUser,
+} from "./scanRunsHistory";
+export type { ScanLinkMinimalRow, ScanRunHistoryRow } from "./scanRunsHistory";
 
 export {
   getResultsForScanRun,
+  getResultsForScanRunForUser,
   getResultsSummaryForScanRun,
+  getResultsSummaryForScanRunForUser,
   insertScanResult,
-} from "./scanResults.js";
-export type { ResultsSummary, ScanResultRow } from "./scanResults.js";
+} from "./scanResults";
+export type { ResultsSummary, ScanResultRow } from "./scanResults";
 
 export {
   getOccurrencesForScanLink,
+  getOccurrencesForScanLinkForUser,
   getScanLinkById,
+  getScanLinkByIdForUser,
   getScanLinkByRunAndUrl,
+  getScanLinkByRunAndUrlForUser,
   getScanLinksForExport,
+  getScanLinksForExportForUser,
   getScanLinksForExportFiltered,
+  getScanLinksForExportFilteredForUser,
   getScanLinksForRun,
+  getScanLinksForRunForUser,
   getScanLinksSummary,
+  getScanLinksSummaryForUser,
   getTimeoutCountForRun,
+  getTimeoutCountForRunForUser,
   getTopLinksByClassification,
+  getTopLinksByClassificationForUser,
   insertScanLinkOccurrence,
   updateScanLinkAfterRecheck,
   setScanLinkIgnoredForRun,
   setScanLinksIgnoredByIds,
   upsertScanLink,
-} from "./scanLinksDedup.js";
+} from "./scanLinksDedup";
 export type {
   ExportClassification,
   PaginatedOccurrences,
@@ -73,9 +93,9 @@ export type {
   ScanLinkExportRow,
   ScanLinkOccurrence,
   ScanLinkOccurrenceRow,
-} from "./scanLinksDedup.js";
+} from "./scanLinksDedup";
 
-export { applyIgnoreRulesForScanRun } from "./scanLinksIgnoreApply.js";
+export { applyIgnoreRulesForScanRun } from "./scanLinksIgnoreApply";
 
 export {
   cancelScanJob,
@@ -87,43 +107,56 @@ export {
   hasActiveJobForSite,
   requeueExpiredScanJobs,
   setScanJobRunId,
-} from "./scanJobs.js";
-export type { ScanJobRow, ScanJobStatus } from "./scanJobs.js";
+} from "./scanJobs";
+export type { ScanJobRow, ScanJobStatus } from "./scanJobs";
 
 export {
   createIgnoreRule,
   deleteIgnoreRule,
   findMatchingIgnoreRule,
+  getIgnoreRuleById,
+  getIgnoreRuleByIdForUser,
   getIgnoreRulesForSite,
   listIgnoreRules,
+  listIgnoreRulesForUser,
+  listIgnoreRulesForSiteForUser,
   listIgnoreRulesForSite,
   matchesIgnoreRules,
   setIgnoreRuleEnabled,
-} from "./ignoreRules.js";
-export type { IgnoreRule, IgnoreRuleType } from "./ignoreRules.js";
+} from "./ignoreRules";
+export type { IgnoreRule, IgnoreRuleType } from "./ignoreRules";
 
 export {
   insertIgnoredOccurrence,
   listIgnoredLinksForRun,
+  listIgnoredLinksForRunForUser,
   listIgnoredOccurrences,
+  listIgnoredOccurrencesForUser,
   upsertIgnoredLink,
-} from "./ignoredLinks.js";
-export type { IgnoredLinkRow, IgnoredOccurrenceRow } from "./ignoredLinks.js";
+} from "./ignoredLinks";
+export type { IgnoredLinkRow, IgnoredOccurrenceRow } from "./ignoredLinks";
 
 export {
   getLinkCountsForRun,
   getNewLinksSinceLastNotified,
   getPreviousCompletedRunId,
   getSiteNotificationSettings,
+  getSiteNotificationSettingsForUser,
   getLastNotifiedScanRunId,
   hasNotificationEvent,
   markScanRunNotified,
   recordNotificationEvent,
   setLastNotifiedScanRunId,
   updateSiteNotificationSettings,
-} from "./notifications.js";
+  updateSiteNotificationSettingsForUser,
+} from "./notifications";
 export type {
   LinkDeltaRow,
   NotificationEventKind,
   NotificationSettings,
-} from "./notifications.js";
+} from "./notifications";
+
+export { createUser, getUserByEmail, getUserById, verifyUser } from "./auth";
+export type { AuthUser } from "./auth";
+
+export { SCAN_EVENT_CHANNEL } from "./events";

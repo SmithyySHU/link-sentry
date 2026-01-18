@@ -1,4 +1,4 @@
-import { ensureConnected } from "./client.js";
+import { ensureConnected } from "./client";
 
 export type NotificationSettings = {
   notifyEnabled: boolean;
@@ -62,6 +62,32 @@ export async function getSiteNotificationSettings(
   };
 }
 
+export async function getSiteNotificationSettingsForUser(
+  userId: string,
+  siteId: string,
+): Promise<NotificationSettings | null> {
+  const client = await ensureConnected();
+  const res = await client.query<SiteNotificationRow>(
+    `
+      SELECT notify_enabled,
+             notify_email,
+             notify_on,
+             notify_include_csv
+      FROM sites
+      WHERE id = $1 AND user_id = $2
+    `,
+    [siteId, userId],
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  return {
+    notifyEnabled: row.notify_enabled,
+    notifyEmail: row.notify_email,
+    notifyOn: row.notify_on,
+    notifyIncludeCsv: row.notify_include_csv,
+  };
+}
+
 export async function updateSiteNotificationSettings(
   siteId: string,
   fields: Partial<NotificationSettings>,
@@ -108,8 +134,56 @@ export async function updateSiteNotificationSettings(
   };
 }
 
+export async function updateSiteNotificationSettingsForUser(
+  userId: string,
+  siteId: string,
+  fields: Partial<NotificationSettings>,
+): Promise<NotificationSettings> {
+  const existing = await getSiteNotificationSettingsForUser(userId, siteId);
+  if (!existing) throw new Error("site_not_found");
+  const next: NotificationSettings = { ...existing, ...fields };
+  if (
+    next.notifyEnabled &&
+    next.notifyOn !== "never" &&
+    (!next.notifyEmail || !isValidEmail(next.notifyEmail))
+  ) {
+    throw new Error("invalid_notify_email");
+  }
+  const client = await ensureConnected();
+  const res = await client.query<SiteNotificationRow>(
+    `
+      UPDATE sites
+      SET notify_enabled = $3,
+          notify_email = $4,
+          notify_on = $5,
+          notify_include_csv = $6
+      WHERE id = $1 AND user_id = $2
+      RETURNING notify_enabled,
+                notify_email,
+                notify_on,
+                notify_include_csv
+    `,
+    [
+      siteId,
+      userId,
+      next.notifyEnabled,
+      next.notifyEmail,
+      next.notifyOn,
+      next.notifyIncludeCsv,
+    ],
+  );
+  const row = res.rows[0];
+  if (!row) throw new Error("site_not_found");
+  return {
+    notifyEnabled: row.notify_enabled,
+    notifyEmail: row.notify_email,
+    notifyOn: row.notify_on,
+    notifyIncludeCsv: row.notify_include_csv,
+  };
+}
+
 function isValidEmail(value: string) {
-  return /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(value);
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
 export async function recordNotificationEvent(

@@ -1,5 +1,5 @@
-import { ensureConnected, closeConnection } from "./client.js";
-import type { ScanRunRow } from "./scanRuns.js";
+import { ensureConnected, closeConnection } from "./client";
+import type { ScanRunRow } from "./scanRuns";
 
 async function main(): Promise<void> {
   const [siteId] = process.argv.slice(2);

@@ -12,7 +12,8 @@
   },
   "dependencies": {
     "@link-sentry/db": "*",
-    "@link-sentry/crawler": "*"
+    "@link-sentry/crawler": "*",
+    "dotenv": "^16.4.5"
   },
   "devDependencies": {
     "tsx": "^4.20.5",

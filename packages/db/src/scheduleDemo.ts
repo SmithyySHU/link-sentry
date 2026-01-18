@@ -1,4 +1,4 @@
-import { computeNextScheduledAt } from "./siteSchedule.js";
+import { computeNextScheduledAt } from "./siteSchedule";
 
 const now = new Date();
 const daily = computeNextScheduledAt(

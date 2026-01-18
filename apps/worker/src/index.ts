@@ -1,3 +1,4 @@
+import dotenv from "dotenv";
 import * as os from "node:os";
 import {
   cancelScanJob,
@@ -17,7 +18,9 @@ import {
   setScanRunStatus,
   setScanJobRunId,
 } from "@link-sentry/db";
-import { runScanForSite } from "../../../packages/crawler/src/scanService.js";
+import { runScanForSite } from "../../../packages/crawler/src/scanService";
+
+dotenv.config({ path: new URL("../../../.env", import.meta.url) });
 
 const workerId = `${os.hostname()}-${process.pid}`;
 const IDLE_WAIT_MS = 1200;
@@ -26,6 +29,7 @@ const SCHEDULE_COOLDOWN_MS = 60000;
 const CLAIM_LEASE_SECONDS = 120;
 const REAPER_TICK_MS = 120000;
 const API_BASE_URL = process.env.WORKER_API_BASE || "http://localhost:3001";
+const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -158,9 +162,13 @@ async function processJob() {
 
 async function notifyScanRun(scanRunId: string) {
   try {
+    const headers: Record<string, string> = {};
+    if (API_INTERNAL_TOKEN) {
+      headers["x-internal-token"] = API_INTERNAL_TOKEN;
+    }
     const res = await fetch(
       `${API_BASE_URL}/scan-runs/${encodeURIComponent(scanRunId)}/notify`,
-      { method: "POST" },
+      { method: "POST", headers },
     );
     if (!res.ok) {
       const text = await res.text().catch(() => "");

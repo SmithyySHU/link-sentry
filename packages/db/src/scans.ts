@@ -1,4 +1,4 @@
-import { ensureConnected } from "./client.js";
+import { ensureConnected } from "./client";
 
 export type ScanStatus =
   | "queued"
@@ -57,6 +57,42 @@ export async function getLatestScanForSite(
   return res.rows[0];
 }
 
+export async function getLatestScanForSiteForUser(
+  userId: string,
+  siteId: string,
+): Promise<ScanRunRow | null> {
+  const client = await ensureConnected();
+  const res = await client.query<ScanRunRow>(
+    `
+      SELECT
+        r.id,
+        r.site_id,
+        r.status,
+        r.started_at,
+        r.finished_at,
+        r.notified_at,
+        r.error_message,
+        r.updated_at,
+        r.start_url,
+        r.total_links,
+        r.checked_links,
+        r.broken_links
+      FROM scan_runs r
+      JOIN sites s ON s.id = r.site_id
+      WHERE r.site_id = $1 AND s.user_id = $2
+      ORDER BY r.started_at DESC
+      LIMIT 1
+    `,
+    [siteId, userId],
+  );
+
+  if (res.rowCount === 0) {
+    return null;
+  }
+
+  return res.rows[0];
+}
+
 export async function getRecentScansForSite(
   siteId: string,
   limit: number,
@@ -89,6 +125,40 @@ export async function getRecentScansForSite(
   return res.rows;
 }
 
+export async function getRecentScansForSiteForUser(
+  userId: string,
+  siteId: string,
+  limit: number,
+): Promise<ScanRunRow[]> {
+  const client = await ensureConnected();
+
+  const res = await client.query<ScanRunRow>(
+    `
+      SELECT
+        r.id,
+        r.site_id,
+        r.status,
+        r.started_at,
+        r.finished_at,
+        r.notified_at,
+        r.error_message,
+        r.updated_at,
+        r.start_url,
+        r.total_links,
+        r.checked_links,
+        r.broken_links
+      FROM scan_runs r
+      JOIN sites s ON s.id = r.site_id
+      WHERE r.site_id = $1 AND s.user_id = $2
+      ORDER BY r.started_at DESC
+      LIMIT $3
+    `,
+    [siteId, userId, limit],
+  );
+
+  return res.rows;
+}
+
 export async function getScanRunById(
   scanRunId: string,
 ): Promise<ScanRunRow | null> {
@@ -114,6 +184,38 @@ export async function getScanRunById(
       LIMIT 1
     `,
     [scanRunId],
+  );
+
+  return res.rows[0] ?? null;
+}
+
+export async function getScanRunByIdForUser(
+  userId: string,
+  scanRunId: string,
+): Promise<ScanRunRow | null> {
+  const client = await ensureConnected();
+
+  const res = await client.query<ScanRunRow>(
+    `
+      SELECT
+        r.id,
+        r.site_id,
+        r.status,
+        r.started_at,
+        r.finished_at,
+        r.notified_at,
+        r.error_message,
+        r.updated_at,
+        r.start_url,
+        r.total_links,
+        r.checked_links,
+        r.broken_links
+      FROM scan_runs r
+      JOIN sites s ON s.id = r.site_id
+      WHERE r.id = $1 AND s.user_id = $2
+      LIMIT 1
+    `,
+    [scanRunId, userId],
   );
 
   return res.rows[0] ?? null;

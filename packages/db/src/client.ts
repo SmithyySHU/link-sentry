@@ -1,5 +1,5 @@
 import { Client } from "pg";
-import { DATABASE_URL } from "./env.js";
+import { DATABASE_URL } from "./env";
 
 let client: Client | null = null;
 let connecting: Promise<Client> | null = null;

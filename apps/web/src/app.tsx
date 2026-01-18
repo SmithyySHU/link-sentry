@@ -1,4 +1,10 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { ScanProgressBar } from "./components/ScanProgressBar";
 
 type ScanStatus =
@@ -42,6 +48,12 @@ interface Site {
   notify_on: NotifyOnOption;
   notify_include_csv: boolean;
   last_notified_scan_run_id: string | null;
+}
+
+interface AuthUser {
+  id: string;
+  email: string;
+  name?: string;
 }
 
 interface SitesResponse {
@@ -226,13 +238,43 @@ interface DiffResponse {
   };
 }
 
+type ScanEventPayload = {
+  type: "scan_started" | "scan_progress" | "scan_completed" | "scan_failed";
+  user_id: string;
+  site_id: string;
+  scan_run_id: string;
+  status: ScanStatus;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string | null;
+  start_url?: string | null;
+  total_links: number;
+  checked_links: number;
+  broken_links: number;
+  error_message: string | null;
+};
+
+type ScheduleEventPayload = {
+  type: "schedule_updated";
+  user_id: string;
+  site_id: string;
+  schedule_enabled: boolean;
+  schedule_frequency: "daily" | "weekly";
+  schedule_time_utc: string;
+  schedule_day_of_week: number | null;
+  next_scheduled_at: string | null;
+  last_scheduled_at: string | null;
+};
+
+type SsePayload = ScanEventPayload | ScheduleEventPayload;
+
 const API_BASE = "http://localhost:3001";
-const POLL_MS = 1500;
 const THEME_STORAGE_KEY = "theme";
 const LINKS_PAGE_SIZE = 50;
 const OCCURRENCES_PAGE_SIZE = 50;
 const IGNORED_OCCURRENCES_LIMIT = 20;
 const PROGRESS_DISMISS_MS = 2000;
+const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 function isInProgress(status: ScanStatus | string | null | undefined) {
   return status === "in_progress" || status === "queued";
@@ -301,6 +343,30 @@ function formatDuration(
   const seconds = diffSec % 60;
   if (minutes === 0) return `${seconds}s`;
   return `${minutes}m ${seconds}s`;
+}
+
+function formatScheduleSummary(
+  isEnabled: boolean,
+  frequency: "daily" | "weekly",
+  timeUtc: string,
+  dayOfWeek: number | null,
+  nextScheduledAt: string | null,
+) {
+  if (!isEnabled) return "Auto-scan: Off";
+  const dayLabel =
+    frequency === "weekly"
+      ? (WEEKDAY_LABELS[dayOfWeek ?? 1] ?? "Mon")
+      : "Daily";
+  const nextLabel = formatDate(nextScheduledAt);
+  return `Auto-scan: ${frequency === "weekly" ? "Weekly" : "Daily"} ${
+    frequency === "weekly" ? dayLabel : ""
+  } ${timeUtc} UTC (Next: ${nextLabel})`.replace("  ", " ");
+}
+
+function formatAlertsSummary(isEnabled: boolean, notifyOn: NotifyOnOption) {
+  if (!isEnabled || notifyOn === "never") return "Alerts: Disabled";
+  const mode = notifyOn === "issues" ? "Only when issues" : "Always";
+  return `Alerts: Enabled (${mode})`;
 }
 
 function getReportScanRunIdFromLocation() {
@@ -469,11 +535,10 @@ type LoadHistoryOpts = {
 const App: React.FC = () => {
   const scansRef = useRef<HTMLDivElement | null>(null);
 
-  const pollHistoryRef = useRef<number | null>(null);
-  const pollRunRef = useRef<number | null>(null);
   const sseRef = useRef<EventSource | null>(null);
-  const sseRunIdRef = useRef<string | null>(null);
   const sseRetryTimerRef = useRef<number | null>(null);
+  const sseFallbackTimerRef = useRef<number | null>(null);
+  const sseBackoffRef = useRef(1000);
   const runStatusRef = useRef<Map<string, ScanStatus>>(new Map());
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const filterDropdownRef = useRef<HTMLDivElement | null>(null);
@@ -482,12 +547,31 @@ const App: React.FC = () => {
   const drawerCloseRef = useRef<HTMLButtonElement | null>(null);
   const detailsDrawerRef = useRef<HTMLDivElement | null>(null);
   const detailsCloseRef = useRef<HTMLButtonElement | null>(null);
-  const themeMenuRef = useRef<HTMLDivElement | null>(null);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
   const progressDismissRef = useRef<number | null>(null);
   const lastRunStatusRef = useRef<{
     id: string | null;
     status: ScanStatus | null;
   }>({ id: null, status: null });
+
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authError, setAuthError] = useState<string | null>(null);
+  const [authWorking, setAuthWorking] = useState(false);
+
+  const apiFetch = useCallback(
+    async (input: RequestInfo | URL, init: RequestInit = {}) => {
+      const res = await fetch(input, { ...init, credentials: "include" });
+      if (res.status === 401) {
+        setAuthUser(null);
+      }
+      return res;
+    },
+    [setAuthUser],
+  );
 
   const selectedSiteIdRef = useRef<string | null>(null);
   const selectedRunIdRef = useRef<string | null>(null);
@@ -606,7 +690,7 @@ const App: React.FC = () => {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [detailsLinkId, setDetailsLinkId] = useState<string | null>(null);
   const [recheckLoadingId, setRecheckLoadingId] = useState<string | null>(null);
-  const [themeMenuOpen, setThemeMenuOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [addSiteOpen, setAddSiteOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [ignoreRulesOpen, setIgnoreRulesOpen] = useState(false);
@@ -678,16 +762,16 @@ const App: React.FC = () => {
   }, [exportMenuOpen]);
 
   useEffect(() => {
-    if (!themeMenuOpen) return;
+    if (!userMenuOpen) return;
     const handleClick = (event: MouseEvent) => {
       const target = event.target as Node;
-      if (themeMenuRef.current && !themeMenuRef.current.contains(target)) {
-        setThemeMenuOpen(false);
+      if (userMenuRef.current && !userMenuRef.current.contains(target)) {
+        setUserMenuOpen(false);
       }
     };
     document.addEventListener("mousedown", handleClick);
     return () => document.removeEventListener("mousedown", handleClick);
-  }, [themeMenuOpen]);
+  }, [userMenuOpen]);
 
   const pinnedRunId = activeRunId ?? selectedRunId;
 
@@ -711,7 +795,7 @@ const App: React.FC = () => {
       setReportLoading(true);
       setReportError(null);
       try {
-        const res = await fetch(
+        const res = await apiFetch(
           `${API_BASE}/scan-runs/${encodeURIComponent(reportScanRunId)}/report`,
           {
             cache: "no-store",
@@ -1039,163 +1123,211 @@ const App: React.FC = () => {
     }));
   }
 
-  function stopPolling() {
-    if (pollHistoryRef.current) {
-      window.clearInterval(pollHistoryRef.current);
-      pollHistoryRef.current = null;
-    }
-    if (pollRunRef.current) {
-      window.clearInterval(pollRunRef.current);
-      pollRunRef.current = null;
-    }
-  }
-
-  function startPolling() {
-    if (sseRef.current) return;
-    stopPolling();
-
-    pollHistoryRef.current = window.setInterval(() => {
-      const siteId = selectedSiteIdRef.current;
-      if (!siteId) return;
-      if (activeRunIdRef.current) return;
-      void loadHistory(siteId, { preserveSelection: true });
-    }, POLL_MS);
-
-    pollRunRef.current = window.setInterval(() => {
-      const runId = activeRunIdRef.current ?? selectedRunIdRef.current;
-      if (!runId) {
-        return;
-      }
-      void refreshSelectedRun(runId);
-    }, POLL_MS);
-  }
-
-  function stopSse() {
+  function stopEventStream() {
     if (sseRetryTimerRef.current) {
       window.clearTimeout(sseRetryTimerRef.current);
       sseRetryTimerRef.current = null;
+    }
+    if (sseFallbackTimerRef.current) {
+      window.clearTimeout(sseFallbackTimerRef.current);
+      sseFallbackTimerRef.current = null;
     }
     if (sseRef.current) {
       sseRef.current.close();
       sseRef.current = null;
     }
-    sseRunIdRef.current = null;
   }
 
-  function scheduleSseRetry(scanRunId: string) {
-    if (sseRetryTimerRef.current) {
-      window.clearTimeout(sseRetryTimerRef.current);
+  async function syncStateOnce() {
+    const siteId = selectedSiteIdRef.current;
+    const runId = selectedRunIdRef.current;
+    if (siteId) {
+      void loadHistory(siteId, {
+        preserveSelection: true,
+        skipResultsWhileInProgress: true,
+      });
     }
-    sseRetryTimerRef.current = window.setTimeout(async () => {
-      if (
-        selectedRunIdRef.current !== scanRunId &&
-        activeRunIdRef.current !== scanRunId
-      )
-        return;
-      try {
-        const res = await fetch(
-          `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}`,
-          {
-            cache: "no-store",
-          },
-        );
-        if (!res.ok) return;
-        const run: ScanRunSummary = await res.json();
-        setHistory((prev) => {
-          const idx = prev.findIndex((r) => r.id === run.id);
-          if (idx === -1) return [run, ...prev];
-          const copy = [...prev];
-          copy[idx] = run;
-          return copy;
-        });
-        if (isInProgress(run.status)) {
-          startSse(scanRunId);
-        }
-      } catch {}
-    }, 5000);
+    if (runId) {
+      void refreshSelectedRun(runId);
+    }
+    void refreshSites();
   }
 
-  function startSse(scanRunId: string) {
-    if (sseRef.current && sseRunIdRef.current === scanRunId) return;
-    stopSse();
-    stopPolling();
+  function scheduleFallbackSync() {
+    if (sseFallbackTimerRef.current) return;
+    sseFallbackTimerRef.current = window.setTimeout(() => {
+      sseFallbackTimerRef.current = null;
+      if (sseRef.current) return;
+      void syncStateOnce();
+    }, 8000);
+  }
 
-    const source = new EventSource(
-      `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/events`,
-    );
-    sseRef.current = source;
-    sseRunIdRef.current = scanRunId;
+  function scheduleSseReconnect() {
+    if (sseRetryTimerRef.current) return;
+    const backoff = sseBackoffRef.current;
+    const jitter = Math.floor(Math.random() * 400);
+    const delay = Math.min(30000, backoff + jitter);
+    sseBackoffRef.current = Math.min(30000, backoff * 2);
+    sseRetryTimerRef.current = window.setTimeout(() => {
+      sseRetryTimerRef.current = null;
+      if (authUser) {
+        startEventStream();
+      }
+    }, delay);
+  }
 
-    const handleScanRunUpdate = (run: ScanRunSummary) => {
+  function handleScanEvent(payload: ScanEventPayload) {
+    if (payload.site_id === selectedSiteIdRef.current) {
+      const runId = payload.scan_run_id;
       setHistory((prev) => {
-        const idx = prev.findIndex((r) => r.id === run.id);
-        if (idx === -1) return [run, ...prev];
+        const idx = prev.findIndex((r) => r.id === runId);
+        const next: ScanRunSummary = {
+          id: runId,
+          site_id: payload.site_id,
+          status: payload.status,
+          started_at: payload.started_at ?? new Date().toISOString(),
+          finished_at: payload.finished_at ?? null,
+          start_url:
+            payload.start_url ?? (idx >= 0 ? prev[idx].start_url : startUrl),
+          total_links: payload.total_links ?? 0,
+          checked_links: payload.checked_links ?? 0,
+          broken_links: payload.broken_links ?? 0,
+          error_message: payload.error_message ?? null,
+        };
+        if (idx === -1) return [next, ...prev];
         const copy = [...prev];
-        copy[idx] = run;
+        copy[idx] = { ...copy[idx], ...next };
         return copy;
       });
-      markRunProgress(run.id);
-      maybeNotifyRunStatus(run);
 
-      if (selectedRunIdRef.current !== run.id) {
-        setSelectedRunId(run.id);
-        selectedRunIdRef.current = run.id;
+      markRunProgress(runId);
+      maybeNotifyRunStatus({
+        id: runId,
+        site_id: payload.site_id,
+        status: payload.status,
+        started_at: payload.started_at ?? null,
+        finished_at: payload.finished_at ?? null,
+        start_url: payload.start_url ?? startUrl,
+        total_links: payload.total_links ?? 0,
+        checked_links: payload.checked_links ?? 0,
+        broken_links: payload.broken_links ?? 0,
+        error_message: payload.error_message ?? null,
+      });
+
+      if (payload.status === "queued" || payload.status === "in_progress") {
+        setActiveRunId(runId);
+        activeRunIdRef.current = runId;
+        setSelectedRunId(runId);
+        selectedRunIdRef.current = runId;
+      } else if (activeRunIdRef.current === runId) {
+        setActiveRunId(null);
+        activeRunIdRef.current = null;
       }
 
-      if (!isInProgress(run.status)) {
-        stopSse();
-        void refreshSelectedRun(run.id);
+      if (
+        payload.status !== "queued" &&
+        payload.status !== "in_progress" &&
+        selectedRunIdRef.current === runId
+      ) {
+        void refreshSelectedRun(runId);
+      }
+    }
+  }
+
+  function handleScheduleEvent(payload: ScheduleEventPayload) {
+    setSites((prev) =>
+      prev.map((site) =>
+        site.id === payload.site_id
+          ? {
+              ...site,
+              schedule_enabled: payload.schedule_enabled,
+              schedule_frequency: payload.schedule_frequency,
+              schedule_time_utc: payload.schedule_time_utc,
+              schedule_day_of_week: payload.schedule_day_of_week,
+              next_scheduled_at: payload.next_scheduled_at,
+              last_scheduled_at: payload.last_scheduled_at,
+            }
+          : site,
+      ),
+    );
+  }
+
+  function startEventStream() {
+    if (sseRef.current) return;
+    if (!authUser) return;
+
+    const source = new EventSource(`${API_BASE}/events/stream`, {
+      withCredentials: true,
+    });
+    sseRef.current = source;
+
+    source.onopen = () => {
+      sseBackoffRef.current = 1000;
+      if (sseRetryTimerRef.current) {
+        window.clearTimeout(sseRetryTimerRef.current);
+        sseRetryTimerRef.current = null;
+      }
+      if (sseFallbackTimerRef.current) {
+        window.clearTimeout(sseFallbackTimerRef.current);
+        sseFallbackTimerRef.current = null;
       }
     };
 
     const handleMessage = (event: MessageEvent) => {
       try {
-        const data = JSON.parse(event.data) as Partial<ScanRunSummary> & {
-          scanRunId?: string;
-        };
-        if (data?.id) {
-          handleScanRunUpdate(data as ScanRunSummary);
+        const payload = JSON.parse(event.data) as SsePayload;
+        if (payload.type === "schedule_updated") {
+          handleScheduleEvent(payload);
           return;
         }
-        if (data?.scanRunId) {
-          setHistory((prev) => {
-            const idx = prev.findIndex((r) => r.id === data.scanRunId);
-            if (idx === -1) return prev;
-            const existing = prev[idx];
-            const updated: ScanRunSummary = {
-              ...existing,
-              ...data,
-              id: existing.id,
-              site_id: existing.site_id,
-            };
-            const copy = [...prev];
-            copy[idx] = updated;
-            return copy;
-          });
-          markRunProgress(data.scanRunId);
-        }
+        handleScanEvent(payload as ScanEventPayload);
       } catch {}
     };
 
-    source.addEventListener("scan_run", handleMessage as EventListener);
-    source.addEventListener("run", handleMessage as EventListener);
-    source.addEventListener("message", handleMessage as EventListener);
-    source.addEventListener("done", () => {
-      stopSse();
-      void refreshSelectedRun(scanRunId);
-    });
+    source.addEventListener("scan_started", handleMessage as EventListener);
+    source.addEventListener("scan_progress", handleMessage as EventListener);
+    source.addEventListener("scan_completed", handleMessage as EventListener);
+    source.addEventListener("scan_failed", handleMessage as EventListener);
+    source.addEventListener("schedule_updated", handleMessage as EventListener);
 
     source.onerror = () => {
       if (sseRef.current !== source) return;
-      stopSse();
-      startPolling();
-      scheduleSseRetry(scanRunId);
+      stopEventStream();
+      scheduleFallbackSync();
+      scheduleSseReconnect();
     };
   }
 
   useEffect(() => {
-    void loadSites();
+    void loadMe();
   }, []);
+
+  useEffect(() => {
+    if (authUser) {
+      void loadSites();
+    } else if (!authLoading) {
+      resetSessionState();
+    }
+  }, [authLoading, authUser]);
+
+  useEffect(() => {
+    if (authUser) {
+      startEventStream();
+    } else {
+      stopEventStream();
+    }
+  }, [authUser]);
+
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible" && authUser) {
+        void syncStateOnce();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () =>
+      document.removeEventListener("visibilitychange", handleVisibility);
+  }, [authUser]);
 
   useEffect(() => {
     const stored = localStorage.getItem(
@@ -1209,7 +1341,7 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const stored = localStorage.getItem("linksentry_pane_width");
+    const stored = localStorage.getItem("scanlark_pane_width");
     const value = stored ? Number(stored) : NaN;
     if (!Number.isNaN(value) && value >= 240 && value <= 520) {
       setPaneWidth(value);
@@ -1264,7 +1396,7 @@ const App: React.FC = () => {
   }, [isResizing]);
 
   useEffect(() => {
-    localStorage.setItem("linksentry_pane_width", String(paneWidth));
+    localStorage.setItem("scanlark_pane_width", String(paneWidth));
   }, [paneWidth]);
 
   useEffect(() => {
@@ -1392,16 +1524,102 @@ const App: React.FC = () => {
 
   useEffect(() => {
     return () => {
-      stopSse();
-      stopPolling();
+      stopEventStream();
     };
   }, []);
+
+  function resetSessionState() {
+    setSites([]);
+    setSelectedSiteId(null);
+    selectedSiteIdRef.current = null;
+    setHistory([]);
+    setResults([]);
+    setIgnoredResults([]);
+    setReportData(null);
+    setSelectedRunId(null);
+    selectedRunIdRef.current = null;
+    setActiveRunId(null);
+    activeRunIdRef.current = null;
+    setDetailsOpen(false);
+    setDetailsLinkId(null);
+  }
+
+  async function loadMe() {
+    setAuthLoading(true);
+    setAuthError(null);
+    try {
+      const res = await apiFetch(`${API_BASE}/me`, {
+        cache: "no-store",
+      });
+      if (res.status === 401) {
+        setAuthUser(null);
+        return;
+      }
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Failed to fetch session: ${res.status}${
+            text ? ` - ${text.slice(0, 200)}` : ""
+          }`,
+        );
+      }
+      const data = (await res.json()) as AuthUser;
+      setAuthUser(data);
+    } catch (err: unknown) {
+      setAuthError(getErrorMessage(err, "Failed to check session"));
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function handleAuthSubmit() {
+    const email = authEmail.trim();
+    if (!email || !authPassword) {
+      setAuthError("Email and password are required.");
+      return;
+    }
+    setAuthWorking(true);
+    setAuthError(null);
+    try {
+      const endpoint = authMode === "login" ? "login" : "register";
+      const res = await apiFetch(`${API_BASE}/auth/${endpoint}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email, password: authPassword }),
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        throw new Error(
+          `Auth failed: ${res.status}${text ? ` - ${text.slice(0, 200)}` : ""}`,
+        );
+      }
+      const data = (await res.json()) as AuthUser;
+      setAuthUser(data);
+      setAuthPassword("");
+      setAuthError(null);
+    } catch (err: unknown) {
+      setAuthError(getErrorMessage(err, "Failed to authenticate"));
+    } finally {
+      setAuthWorking(false);
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await apiFetch(`${API_BASE}/auth/logout`, { method: "POST" });
+    } catch (err) {
+      console.error("Logout failed", err);
+    } finally {
+      setAuthUser(null);
+      resetSessionState();
+    }
+  }
 
   async function loadSites() {
     setSitesLoading(true);
     setSitesError(null);
     try {
-      const res = await fetch(`${API_BASE}/sites`, { cache: "no-store" });
+      const res = await apiFetch(`${API_BASE}/sites`, { cache: "no-store" });
       if (!res.ok) throw new Error(`Request failed: ${res.status}`);
       const data: SitesResponse = await res.json();
 
@@ -1447,6 +1665,46 @@ const App: React.FC = () => {
     }
   }
 
+  async function refreshSites() {
+    try {
+      const res = await apiFetch(`${API_BASE}/sites`, { cache: "no-store" });
+      if (!res.ok) return;
+      const data: SitesResponse = await res.json();
+      setSites(data.sites);
+
+      const currentId = selectedSiteIdRef.current;
+      if (currentId) {
+        const match = data.sites.find((site) => site.id === currentId);
+        if (match) {
+          setStartUrl(match.url);
+          return;
+        }
+      }
+
+      if (data.sites.length === 0) {
+        setSelectedSiteId(null);
+        selectedSiteIdRef.current = null;
+        setStartUrl("");
+        setHistory([]);
+        setSelectedRunId(null);
+        selectedRunIdRef.current = null;
+        setActiveRunId(null);
+        activeRunIdRef.current = null;
+        setResults([]);
+        resetOccurrencesState();
+        return;
+      }
+
+      if (!currentId) {
+        const first = data.sites[0];
+        setSelectedSiteId(first.id);
+        selectedSiteIdRef.current = first.id;
+        setStartUrl(first.url);
+        await loadHistory(first.id, { preserveSelection: false });
+      }
+    } catch {}
+  }
+
   async function loadHistory(siteId: string, opts?: LoadHistoryOpts) {
     const preserveSelection = !!opts?.preserveSelection;
     const skipResultsWhileInProgress = !!opts?.skipResultsWhileInProgress;
@@ -1454,7 +1712,7 @@ const App: React.FC = () => {
     setHistoryLoading(true);
     setHistoryError(null);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(siteId)}/scans?limit=10`,
         { cache: "no-store" },
       );
@@ -1527,7 +1785,7 @@ const App: React.FC = () => {
     offset: number,
     label: string,
   ): Promise<ScanLinksResponse> {
-    const res = await fetch(
+    const res = await apiFetch(
       buildScanLinksUrl(
         runId,
         classification,
@@ -1612,9 +1870,12 @@ const App: React.FC = () => {
     setIgnoredResults([]);
     setIgnoredOffset(0);
     try {
-      const res = await fetch(buildIgnoredLinksUrl(runId, 0, LINKS_PAGE_SIZE), {
-        cache: "no-store",
-      });
+      const res = await apiFetch(
+        buildIgnoredLinksUrl(runId, 0, LINKS_PAGE_SIZE),
+        {
+          cache: "no-store",
+        },
+      );
       if (!res.ok)
         throw new Error(`Failed to load ignored links: ${res.status}`);
       const data: IgnoredLinksResponse = await res.json();
@@ -1724,7 +1985,7 @@ const App: React.FC = () => {
     if (ignoredLoading) return;
     setIgnoredLoading(true);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         buildIgnoredLinksUrl(runId, ignoredOffset, LINKS_PAGE_SIZE),
         { cache: "no-store" },
       );
@@ -1756,7 +2017,7 @@ const App: React.FC = () => {
         setOffset: React.Dispatch<React.SetStateAction<number>>,
         setHasMore: React.Dispatch<React.SetStateAction<boolean>>,
       ) => {
-        const res = await fetch(
+        const res = await apiFetch(
           buildScanLinksUrl(
             runId,
             classification,
@@ -1815,31 +2076,6 @@ const App: React.FC = () => {
       setResultsLoading(false);
     }
   }
-
-  useEffect(() => {
-    if (!selectedSiteId) {
-      stopPolling();
-      return;
-    }
-
-    const shouldPoll = !!activeRunId || isSelectedRunInProgress;
-
-    if (shouldPoll && !sseRef.current) startPolling();
-    else if (!shouldPoll) stopPolling();
-
-    return () => stopPolling();
-  }, [selectedSiteId, activeRunId, selectedRun?.id, selectedRun?.status]);
-
-  useEffect(() => {
-    if (selectedRun && isInProgress(selectedRun.status)) {
-      startSse(selectedRun.id);
-      return;
-    }
-
-    if (sseRef.current && sseRunIdRef.current === selectedRun?.id) {
-      stopSse();
-    }
-  }, [selectedRun?.id, selectedRun?.status]);
 
   useEffect(() => {
     if (!selectedRunId) return;
@@ -1921,7 +2157,7 @@ const App: React.FC = () => {
 
   async function refreshSelectedRun(runId: string) {
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/scan-runs/${encodeURIComponent(runId)}`,
         {
           cache: "no-store",
@@ -1954,8 +2190,6 @@ const App: React.FC = () => {
         setActiveRunId(null);
         activeRunIdRef.current = null;
 
-        stopSse();
-        stopPolling();
         await loadHistory(run.site_id, { preserveSelection: true });
         await loadResults(run.id);
       }
@@ -1965,8 +2199,6 @@ const App: React.FC = () => {
   async function handleSelectSite(site: Site) {
     if (site.id === selectedSiteId) return;
 
-    stopPolling();
-    stopSse();
     setIsDrawerOpen(false);
     setDetailsOpen(false);
     setDetailsLinkId(null);
@@ -1993,10 +2225,24 @@ const App: React.FC = () => {
     await handleRunScanWithUrl(startUrl);
   }
 
+  function handleNewScanAction() {
+    if (!hasSites) {
+      setCreateError(null);
+      setAddSiteOpen(true);
+      return;
+    }
+    if (!selectedSiteId) {
+      setIsDrawerOpen(true);
+      pushToast("Select a site to start a new scan", "warning");
+      return;
+    }
+    void handleRunScan();
+  }
+
   async function handleCancelScan() {
     if (!selectedRunId) return;
     try {
-      await fetch(
+      await apiFetch(
         `${API_BASE}/scan-runs/${encodeURIComponent(selectedRunId)}/cancel`,
         {
           method: "POST",
@@ -2026,7 +2272,7 @@ const App: React.FC = () => {
     setCreatingSite(true);
     setCreateError(null);
     try {
-      const res = await fetch(`${API_BASE}/sites`, {
+      const res = await apiFetch(`${API_BASE}/sites`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ url }),
@@ -2062,7 +2308,7 @@ const App: React.FC = () => {
     setDeletingSiteId(siteId);
     setDeleteError(null);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(siteId)}`,
         {
           method: "DELETE",
@@ -2083,9 +2329,6 @@ const App: React.FC = () => {
       }
 
       if (selectedSiteId === siteId) {
-        stopPolling();
-        stopSse();
-
         setSelectedSiteId(null);
         selectedSiteIdRef.current = null;
 
@@ -2115,7 +2358,7 @@ const App: React.FC = () => {
     setScheduleSaving(true);
     setScheduleError(null);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/schedule`,
         {
           method: "PUT",
@@ -2174,7 +2417,7 @@ const App: React.FC = () => {
     setNotifyLoading(true);
     setNotifyError(null);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(siteId)}/notification-settings`,
         {
           cache: "no-store",
@@ -2218,7 +2461,7 @@ const App: React.FC = () => {
     setNotifySaving(true);
     setNotifyError(null);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/notification-settings`,
         {
           method: "PATCH",
@@ -2278,7 +2521,7 @@ const App: React.FC = () => {
     setNotifyTestSending(true);
     setNotifyError(null);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/notifications/test`,
         { method: "POST" },
       );
@@ -2302,7 +2545,7 @@ const App: React.FC = () => {
     setOccurrencesErrorByLinkId((prev) => ({ ...prev, [scanLinkId]: null }));
 
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/scan-links/${encodeURIComponent(scanLinkId)}/occurrences?limit=${OCCURRENCES_PAGE_SIZE}&offset=${offset}`,
         { cache: "no-store" },
       );
@@ -2445,7 +2688,7 @@ const App: React.FC = () => {
     if (!selectedRunId) return;
     setTriggeringScan(true);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/scan-runs/${encodeURIComponent(selectedRunId)}/retry`,
         { method: "POST" },
       );
@@ -2464,7 +2707,6 @@ const App: React.FC = () => {
           run.id === selectedRunId ? { ...run, status: "queued" } : run,
         ),
       );
-      startSse(selectedRunId);
       pushToast("Scan queued", "info");
     } catch (err: unknown) {
       pushToast(getErrorMessage(err, "Failed to retry scan"), "warning");
@@ -2484,7 +2726,7 @@ const App: React.FC = () => {
     }
     setRecheckLoadingId(row.id);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/scan-links/${encodeURIComponent(row.id)}/recheck`,
         { method: "POST" },
       );
@@ -2548,7 +2790,7 @@ const App: React.FC = () => {
         return copy;
       });
 
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/scan-runs/${encodeURIComponent(selectedRunId)}/scan-links/${encodeURIComponent(row.id)}/ignore`,
         {
           method: "POST",
@@ -2591,7 +2833,7 @@ const App: React.FC = () => {
             : item,
         ),
       );
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/scan-runs/${encodeURIComponent(selectedRunId)}/scan-links/${encodeURIComponent(row.id)}/ignore`,
         {
           method: "POST",
@@ -2617,7 +2859,7 @@ const App: React.FC = () => {
           void (async () => {
             try {
               if (data.rule?.id) {
-                const deleteRes = await fetch(
+                const deleteRes = await apiFetch(
                   `${API_BASE}/ignore-rules/${encodeURIComponent(data.rule.id)}`,
                   { method: "DELETE" },
                 );
@@ -2626,7 +2868,7 @@ const App: React.FC = () => {
                 }
                 await reapplyIgnoreRules(selectedRunId);
               } else {
-                const unignoreRes = await fetch(
+                const unignoreRes = await apiFetch(
                   `${API_BASE}/scan-runs/${encodeURIComponent(
                     selectedRunId,
                   )}/links/${encodeURIComponent(data.link_url)}/unignore`,
@@ -2659,7 +2901,7 @@ const App: React.FC = () => {
     setIgnoreRulesLoading(true);
     setIgnoreRulesError(null);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(siteId)}/ignore-rules`,
         {
           cache: "no-store",
@@ -2679,7 +2921,7 @@ const App: React.FC = () => {
     setDiffLoading(true);
     setDiffError(null);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/diff?compareTo=${encodeURIComponent(compareTo)}`,
         { cache: "no-store" },
       );
@@ -2710,7 +2952,7 @@ const App: React.FC = () => {
     setIgnoredOccLoading((prev) => ({ ...prev, [ignoredLinkId]: true }));
     setIgnoredOccError((prev) => ({ ...prev, [ignoredLinkId]: null }));
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/scan-runs/${encodeURIComponent(scanRunId)}/ignored/${encodeURIComponent(ignoredLinkId)}/occurrences?limit=${IGNORED_OCCURRENCES_LIMIT}&offset=0`,
         { cache: "no-store" },
       );
@@ -2730,7 +2972,7 @@ const App: React.FC = () => {
     }
   }
   async function reapplyIgnoreRules(runId: string) {
-    await fetch(
+    await apiFetch(
       `${API_BASE}/scan-runs/${encodeURIComponent(runId)}/reapply-ignore?force=1`,
       {
         method: "POST",
@@ -2743,7 +2985,7 @@ const App: React.FC = () => {
     const pattern = newRulePattern.trim();
     if (!pattern) return;
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/ignore-rules`,
         {
           method: "POST",
@@ -2775,7 +3017,7 @@ const App: React.FC = () => {
 
   async function handleToggleIgnoreRule(rule: IgnoreRule) {
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/ignore-rules/${encodeURIComponent(rule.id)}`,
         {
           method: "PATCH",
@@ -2794,7 +3036,7 @@ const App: React.FC = () => {
 
   async function handleDeleteIgnoreRule(rule: IgnoreRule) {
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/ignore-rules/${encodeURIComponent(rule.id)}`,
         {
           method: "DELETE",
@@ -2815,7 +3057,7 @@ const App: React.FC = () => {
     setTriggeringScan(true);
     setTriggerError(null);
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/scans`,
         {
           method: "POST",
@@ -2862,7 +3104,6 @@ const App: React.FC = () => {
         activeRunIdRef.current = scanRunId;
         markRunProgress(scanRunId);
 
-        startSse(scanRunId);
         void refreshSelectedRun(scanRunId);
         pushToast("Scan queued", "info");
       } else {
@@ -2935,7 +3176,7 @@ const App: React.FC = () => {
   ) {
     if (!selectedSiteId) return;
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/sites/${encodeURIComponent(selectedSiteId)}/ignore-rules`,
         {
           method: "POST",
@@ -4377,11 +4618,162 @@ const App: React.FC = () => {
         }
       `}</style>
       <div className="app-container">
-        {reportView ? (
+        {authLoading ? (
+          <div
+            style={{
+              minHeight: "60vh",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              color: "var(--muted)",
+              fontSize: "13px",
+            }}
+          >
+            Loading session...
+          </div>
+        ) : !authUser ? (
+          <div
+            style={{
+              minHeight: "70vh",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: "24px",
+            }}
+          >
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void handleAuthSubmit();
+              }}
+              style={{
+                width: "min(420px, 100%)",
+                background: "var(--panel)",
+                border: "1px solid var(--border)",
+                borderRadius: "18px",
+                padding: "20px",
+                display: "flex",
+                flexDirection: "column",
+                gap: "14px",
+                boxShadow: "var(--shadow)",
+              }}
+            >
+              <div>
+                <div
+                  style={{
+                    fontSize: "20px",
+                    fontWeight: 700,
+                    fontFamily: "var(--font-display)",
+                  }}
+                >
+                  Scanlark
+                </div>
+                <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                  Beta access required
+                </div>
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  gap: "8px",
+                }}
+              >
+                {(["login", "register"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setAuthMode(mode)}
+                    style={{
+                      padding: "6px 12px",
+                      borderRadius: "999px",
+                      border: "1px solid var(--border)",
+                      background:
+                        authMode === mode ? "var(--surface-2)" : "transparent",
+                      cursor: "pointer",
+                      fontSize: "12px",
+                      fontWeight: 600,
+                    }}
+                  >
+                    {mode === "login" ? "Login" : "Register"}
+                  </button>
+                ))}
+              </div>
+              <label style={{ fontSize: "12px", color: "var(--muted)" }}>
+                Email
+                <input
+                  type="email"
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  autoComplete="email"
+                  placeholder="you@example.com"
+                  disabled={authWorking}
+                  style={{
+                    marginTop: "6px",
+                    width: "100%",
+                    padding: "8px 10px",
+                    borderRadius: "10px",
+                    border: "1px solid var(--border)",
+                    background: "var(--panel)",
+                    color: "var(--text)",
+                  }}
+                />
+              </label>
+              <label style={{ fontSize: "12px", color: "var(--muted)" }}>
+                Password
+                <input
+                  type="password"
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  autoComplete={
+                    authMode === "login" ? "current-password" : "new-password"
+                  }
+                  placeholder="Enter your password"
+                  disabled={authWorking}
+                  style={{
+                    marginTop: "6px",
+                    width: "100%",
+                    padding: "8px 10px",
+                    borderRadius: "10px",
+                    border: "1px solid var(--border)",
+                    background: "var(--panel)",
+                    color: "var(--text)",
+                  }}
+                />
+              </label>
+              {authError && (
+                <div style={{ fontSize: "12px", color: "var(--warning)" }}>
+                  {authError}
+                </div>
+              )}
+              <button
+                type="submit"
+                disabled={authWorking}
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: "12px",
+                  border: "1px solid var(--border)",
+                  background: "var(--panel-elev)",
+                  cursor: authWorking ? "not-allowed" : "pointer",
+                  fontSize: "13px",
+                  fontWeight: 600,
+                }}
+              >
+                {authWorking
+                  ? "Please wait..."
+                  : authMode === "login"
+                    ? "Log in"
+                    : "Create account"}
+              </button>
+              <div style={{ fontSize: "11px", color: "var(--muted)" }}>
+                TODO: Swap to managed auth provider before public launch.
+              </div>
+            </form>
+          </div>
+        ) : reportView ? (
           <div className="report-page">
             <div className="report-header">
               <div>
-                <div className="report-title">Link Sentry</div>
+                <div className="report-title">Scanlark</div>
                 <div className="report-subtitle">Scan Report</div>
               </div>
               <div className="report-actions">
@@ -4611,7 +5003,7 @@ const App: React.FC = () => {
                       letterSpacing: "-0.02em",
                     }}
                   >
-                    Link Sentry
+                    Scanlark
                   </div>
                   <div style={{ fontSize: "11px", color: "var(--muted)" }}>
                     Link integrity monitor
@@ -4642,81 +5034,6 @@ const App: React.FC = () => {
                   flexWrap: "wrap",
                 }}
               >
-                <div className="theme-toggle" ref={themeMenuRef}>
-                  <button
-                    onClick={handleThemeToggle}
-                    style={{
-                      position: "relative",
-                      width: "44px",
-                      height: "24px",
-                      borderRadius: "999px",
-                      border: "1px solid var(--border)",
-                      background:
-                        themeMode === "dark"
-                          ? "var(--surface-2)"
-                          : "var(--accent)",
-                      cursor: "pointer",
-                      padding: 0,
-                    }}
-                    title="Toggle theme"
-                  >
-                    <span
-                      style={{
-                        position: "absolute",
-                        top: "2px",
-                        left: themeMode === "dark" ? "2px" : "22px",
-                        width: "20px",
-                        height: "20px",
-                        borderRadius: "999px",
-                        background: "var(--panel)",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: "12px",
-                        transition: "left 160ms ease",
-                      }}
-                    >
-                      {themeMode === "dark" ? "🌙" : "☀️"}
-                    </span>
-                  </button>
-                  <button
-                    onClick={() => setThemeMenuOpen((prev) => !prev)}
-                    style={{
-                      padding: "4px 6px",
-                      borderRadius: "8px",
-                      border: "1px solid var(--border)",
-                      background: "var(--panel)",
-                      fontSize: "11px",
-                      cursor: "pointer",
-                    }}
-                    title="Theme settings"
-                  >
-                    System
-                  </button>
-                  {themeMenuOpen && (
-                    <div className="theme-menu">
-                      {(["system", "dark", "light"] as const).map((mode) => (
-                        <button
-                          key={mode}
-                          className={
-                            themePreference === mode ? "active" : undefined
-                          }
-                          onClick={() => {
-                            handleThemeChange(mode);
-                            setThemeMenuOpen(false);
-                          }}
-                        >
-                          {mode === "system"
-                            ? "System"
-                            : mode === "dark"
-                              ? "Dark"
-                              : "Light"}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
                 {hasSites && (
                   <button
                     onClick={() => {
@@ -4736,51 +5053,105 @@ const App: React.FC = () => {
                     Add site
                   </button>
                 )}
-                <button
-                  onClick={handleRunScan}
-                  disabled={!selectedSiteId || triggeringScan || canCancelRun}
-                  style={{
-                    padding: "6px 12px",
-                    borderRadius: "10px",
-                    border: "none",
-                    background: triggeringScan
-                      ? "var(--panel-elev)"
-                      : "linear-gradient(135deg, var(--accent), var(--accent-2))",
-                    color: "white",
-                    fontWeight: 600,
-                    cursor:
-                      triggeringScan || !selectedSiteId || canCancelRun
-                        ? "not-allowed"
-                        : "pointer",
-                  }}
-                >
-                  {triggeringScan ? "Running..." : "New scan"}
-                </button>
-                <button
-                  style={{
-                    padding: "6px 10px",
-                    borderRadius: "10px",
-                    border: "1px solid var(--border)",
-                    background: "var(--panel)",
-                    fontSize: "12px",
-                    cursor: "pointer",
-                  }}
-                >
-                  Login
-                </button>
-                <button
-                  style={{
-                    padding: "6px 10px",
-                    borderRadius: "10px",
-                    border: "1px solid var(--border)",
-                    background: "var(--panel)",
-                    fontSize: "12px",
-                    cursor: "pointer",
-                  }}
-                >
-                  Register
-                </button>
-                {/* TODO: replace auth placeholders with user menu */}
+                {authUser ? (
+                  <div
+                    ref={userMenuRef}
+                    style={{
+                      position: "relative",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "8px",
+                    }}
+                  >
+                    <div style={{ fontSize: "12px", color: "var(--muted)" }}>
+                      Hi, {authUser.name ?? authUser.email}
+                    </div>
+                    <button
+                      onClick={() => setUserMenuOpen((prev) => !prev)}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        fontSize: "12px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Options
+                    </button>
+                    {userMenuOpen && (
+                      <div className="theme-menu">
+                        <div
+                          style={{
+                            fontSize: "11px",
+                            color: "var(--muted)",
+                            padding: "4px 8px",
+                          }}
+                        >
+                          Theme
+                        </div>
+                        <button onClick={handleThemeToggle}>
+                          Toggle {themeMode === "dark" ? "Light" : "Dark"}
+                        </button>
+                        {(["system", "dark", "light"] as const).map((mode) => (
+                          <button
+                            key={mode}
+                            className={
+                              themePreference === mode ? "active" : undefined
+                            }
+                            onClick={() => {
+                              handleThemeChange(mode);
+                              setUserMenuOpen(false);
+                            }}
+                          >
+                            {mode === "system"
+                              ? "System"
+                              : mode === "dark"
+                                ? "Dark"
+                                : "Light"}
+                          </button>
+                        ))}
+                        <div
+                          style={{
+                            height: "1px",
+                            margin: "6px 0",
+                            background: "var(--border)",
+                          }}
+                        />
+                        <button onClick={() => void handleLogout()}>
+                          Logout
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        fontSize: "12px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Login
+                    </button>
+                    <button
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        fontSize: "12px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      Register
+                    </button>
+                  </>
+                )}
               </div>
             </nav>
 
@@ -4809,7 +5180,7 @@ const App: React.FC = () => {
                           letterSpacing: "-0.02em",
                         }}
                       >
-                        Link Sentry
+                        Scanlark
                       </h1>
                       <p
                         style={{
@@ -5475,12 +5846,10 @@ const App: React.FC = () => {
                                   if (isInProgress(run.status)) {
                                     setActiveRunId(run.id);
                                     activeRunIdRef.current = run.id;
-                                    startSse(run.id);
                                     void refreshSelectedRun(run.id);
                                   } else {
                                     setActiveRunId(null);
                                     activeRunIdRef.current = null;
-                                    stopSse();
                                     void loadResults(run.id);
                                   }
                                 }}
@@ -5600,8 +5969,75 @@ const App: React.FC = () => {
                         {startUrl || "Select a site to begin"}
                       </span>
                     </div>
+                    <div
+                      style={{
+                        marginTop: "10px",
+                        padding: "8px 10px",
+                        borderRadius: "10px",
+                        border: "1px solid var(--border)",
+                        background: "var(--panel)",
+                        fontSize: "12px",
+                        color: "var(--muted)",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "4px",
+                        maxWidth: "520px",
+                      }}
+                    >
+                      <div style={{ fontWeight: 600, color: "var(--text)" }}>
+                        Automation
+                      </div>
+                      <div>
+                        {selectedSite
+                          ? formatScheduleSummary(
+                              scheduleEnabled,
+                              scheduleFrequency,
+                              scheduleTimeUtc,
+                              scheduleDayOfWeek,
+                              selectedSite.next_scheduled_at,
+                            )
+                          : "Auto-scan: —"}
+                      </div>
+                      <div>
+                        {selectedSite
+                          ? formatAlertsSummary(notifyEnabled, notifyOn)
+                          : "Alerts: —"}
+                      </div>
+                    </div>
                   </div>
                   <div style={{ display: "flex", gap: "8px" }}>
+                    <button
+                      onClick={handleNewScanAction}
+                      disabled={
+                        !!selectedSiteId && (triggeringScan || canCancelRun)
+                      }
+                      style={{
+                        padding: "6px 12px",
+                        borderRadius: "999px",
+                        border: "none",
+                        background:
+                          selectedSiteId && (triggeringScan || canCancelRun)
+                            ? "var(--panel-elev)"
+                            : "linear-gradient(135deg, var(--accent), var(--accent-2))",
+                        color: "white",
+                        fontWeight: 600,
+                        cursor:
+                          selectedSiteId && (triggeringScan || canCancelRun)
+                            ? "not-allowed"
+                            : "pointer",
+                      }}
+                      title={
+                        !hasSites
+                          ? "Add a site to start scanning"
+                          : !selectedSiteId
+                            ? "Select a site to start a scan"
+                            : "Start a new scan"
+                      }
+                    >
+                      {selectedSiteId && triggeringScan
+                        ? "Running..."
+                        : "New scan"}
+                    </button>
                     <button
                       onClick={() => startUrl && copyToClipboard(startUrl)}
                       disabled={!startUrl}
@@ -5665,7 +6101,7 @@ const App: React.FC = () => {
                       Add your first site to start scanning
                     </div>
                     <div style={{ fontSize: "12px", color: "var(--muted)" }}>
-                      Link Sentry monitors your URLs, detects broken links, and
+                      Scanlark monitors your URLs, detects broken links, and
                       highlights blocked or timed-out requests.
                     </div>
                     <div style={{ marginTop: "16px" }}>
@@ -5888,7 +6324,7 @@ const App: React.FC = () => {
                           }}
                         >
                           Select a scan run to explore results, or start a new
-                          scan from the top bar.
+                          scan from the site panel.
                         </div>
                       </div>
                     )}

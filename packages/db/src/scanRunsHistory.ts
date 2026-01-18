@@ -1,5 +1,5 @@
-import { ensureConnected } from "./client.js";
-import type { LinkClassification } from "./scanRuns.js";
+import { ensureConnected } from "./client";
+import type { LinkClassification } from "./scanRuns";
 
 export interface ScanRunHistoryRow {
   id: string;
@@ -49,6 +49,37 @@ export async function getRecentScanRunsForSite(
       LIMIT $2
     `,
     [siteId, limit],
+  );
+  return res.rows;
+}
+
+export async function getRecentScanRunsForSiteForUser(
+  userId: string,
+  siteId: string,
+  limit: number,
+): Promise<ScanRunHistoryRow[]> {
+  const client = await ensureConnected();
+  const res = await client.query<ScanRunHistoryRow>(
+    `
+      SELECT
+        r.id,
+        r.site_id,
+        r.status,
+        r.started_at,
+        r.finished_at,
+        r.error_message,
+        r.updated_at,
+        r.start_url,
+        r.total_links,
+        r.checked_links,
+        r.broken_links
+      FROM scan_runs r
+      JOIN sites s ON s.id = r.site_id
+      WHERE r.site_id = $1 AND s.user_id = $2
+      ORDER BY r.started_at DESC
+      LIMIT $3
+    `,
+    [siteId, userId, limit],
   );
   return res.rows;
 }
@@ -134,4 +165,25 @@ export async function getDiffBetweenRuns(runA: string, runB: string) {
       b: totalsFor(rowsB),
     },
   };
+}
+
+export async function getDiffBetweenRunsForUser(
+  userId: string,
+  runA: string,
+  runB: string,
+) {
+  const client = await ensureConnected();
+  const res = await client.query<{ id: string }>(
+    `
+      SELECT r.id
+      FROM scan_runs r
+      JOIN sites s ON s.id = r.site_id
+      WHERE s.user_id = $1 AND r.id IN ($2, $3)
+    `,
+    [userId, runA, runB],
+  );
+  if (res.rows.length < 2) {
+    return null;
+  }
+  return getDiffBetweenRuns(runA, runB);
 }

@@ -1,4 +1,4 @@
-import { ensureConnected } from "./client.js";
+import { ensureConnected } from "./client";
 
 export interface IgnoredLinkRow {
   id: string;
@@ -117,6 +117,49 @@ export async function listIgnoredLinksForRun(
   };
 }
 
+export async function listIgnoredLinksForRunForUser(
+  userId: string,
+  scanRunId: string,
+  limit: number,
+  offset: number,
+) {
+  const client = await ensureConnected();
+  const countRes = await client.query<{ count: string }>(
+    `
+      SELECT COUNT(*) as count
+      FROM scan_ignored_links sil
+      JOIN scan_runs r ON r.id = sil.scan_run_id
+      JOIN sites s ON s.id = r.site_id
+      WHERE sil.scan_run_id = $1 AND s.user_id = $2
+    `,
+    [scanRunId, userId],
+  );
+  const totalMatching = Number(countRes.rows[0]?.count ?? 0);
+
+  const res = await client.query<IgnoredLinkRow>(
+    `
+      SELECT
+        sil.*,
+        ir.rule_type as rule_type,
+        ir.pattern as rule_pattern
+      FROM scan_ignored_links sil
+      LEFT JOIN ignore_rules ir ON ir.id = sil.rule_id
+      JOIN scan_runs r ON r.id = sil.scan_run_id
+      JOIN sites s ON s.id = r.site_id
+      WHERE sil.scan_run_id = $1 AND s.user_id = $2
+      ORDER BY sil.last_seen_at DESC
+      LIMIT $3 OFFSET $4
+    `,
+    [scanRunId, userId, limit, offset],
+  );
+
+  return {
+    links: res.rows,
+    countReturned: res.rows.length,
+    totalMatching,
+  };
+}
+
 export async function listIgnoredOccurrences(
   ignoredLinkId: string,
   limit: number,
@@ -138,6 +181,45 @@ export async function listIgnoredOccurrences(
       LIMIT $2 OFFSET $3
     `,
     [ignoredLinkId, limit, offset],
+  );
+
+  return {
+    occurrences: res.rows,
+    countReturned: res.rows.length,
+    totalMatching,
+  };
+}
+
+export async function listIgnoredOccurrencesForUser(
+  userId: string,
+  ignoredLinkId: string,
+  limit: number,
+  offset: number,
+) {
+  const client = await ensureConnected();
+  const countRes = await client.query<{ count: string }>(
+    `
+      SELECT COUNT(*) as count
+      FROM scan_ignored_occurrences sio
+      JOIN scan_runs r ON r.id = sio.scan_run_id
+      JOIN sites s ON s.id = r.site_id
+      WHERE sio.scan_ignored_link_id = $1 AND s.user_id = $2
+    `,
+    [ignoredLinkId, userId],
+  );
+  const totalMatching = Number(countRes.rows[0]?.count ?? 0);
+
+  const res = await client.query<IgnoredOccurrenceRow>(
+    `
+      SELECT sio.*
+      FROM scan_ignored_occurrences sio
+      JOIN scan_runs r ON r.id = sio.scan_run_id
+      JOIN sites s ON s.id = r.site_id
+      WHERE sio.scan_ignored_link_id = $1 AND s.user_id = $2
+      ORDER BY sio.created_at DESC
+      LIMIT $3 OFFSET $4
+    `,
+    [ignoredLinkId, userId, limit, offset],
   );
 
   return {

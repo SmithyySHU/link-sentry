@@ -1,6 +1,6 @@
 # Security Policy
 
-This document describes the current security posture of **Link-Sentry**.
+This document describes the current security posture of **Scanlark**.
 
 > **Status:** This project is currently in active development and **not yet hardened for public, multi-tenant production use**.  
 > The notes below explain known limitations and how we plan to address them.
@@ -106,7 +106,7 @@ Dependabot reports a vulnerability in **`esbuild` ≤ 0.24.2** related to its bu
 - The dev server sets `Access-Control-Allow-Origin: *` on all responses.
 - This can, in some scenarios, let a malicious website read resources from a local `esbuild` dev server running on the developer’s machine.
 
-### How Link-Sentry uses esbuild
+### How Scanlark uses esbuild
 
 - `esbuild` is used **only as a build tool / bundler**, pulled in via:
   - `vite`
@@ -130,7 +130,7 @@ Because these ranges conflict, Dependabot cannot bump `esbuild` to a fixed versi
 
 For now:
 
-- This issue affects **local development environments only**, not production deployments of Link-Sentry.
+- This issue affects **local development environments only**, not production deployments of Scanlark.
 - We treat it as a **known limitation of the current dev toolchain**.
 
 > **Decision:**
@@ -173,7 +173,7 @@ These are tracked as part of the “production-hardening” checklist and will b
 
 ## Reporting a Vulnerability
 
-If you believe you’ve found a security issue in Link-Sentry:
+If you believe you’ve found a security issue in Scanlark:
 
 - Please open a **private security report** (for example via GitHub Security Advisory / private issue) rather than a public issue with exploit details.
 - Provide:

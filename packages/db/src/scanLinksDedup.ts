@@ -1,5 +1,44 @@
-import { ensureConnected } from "./client.js";
-import type { LinkClassification } from "./scanRuns.js";
+import { ensureConnected } from "./client";
+import type { LinkClassification } from "./scanRuns";
+
+async function isScanRunOwnedByUser(
+  userId: string,
+  scanRunId: string,
+): Promise<boolean> {
+  const client = await ensureConnected();
+  const res = await client.query(
+    `
+      SELECT 1
+      FROM scan_runs r
+      JOIN sites s ON s.id = r.site_id
+      WHERE r.id = $1 AND s.user_id = $2
+      LIMIT 1
+    `,
+    [scanRunId, userId],
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
+async function getScanLinkOwnership(
+  userId: string,
+  scanLinkId: string,
+): Promise<{ scanRunId: string } | null> {
+  const client = await ensureConnected();
+  const res = await client.query<{ scan_run_id: string }>(
+    `
+      SELECT l.scan_run_id
+      FROM scan_links l
+      JOIN scan_runs r ON r.id = l.scan_run_id
+      JOIN sites s ON s.id = r.site_id
+      WHERE l.id = $1 AND s.user_id = $2
+      LIMIT 1
+    `,
+    [scanLinkId, userId],
+  );
+  const row = res.rows[0];
+  if (!row) return null;
+  return { scanRunId: row.scan_run_id };
+}
 
 /**
  * Represents a unique link found in a scan run.
@@ -222,6 +261,26 @@ export async function getScanLinksForRun(
   };
 }
 
+export async function getScanLinksForRunForUser(
+  userId: string,
+  scanRunId: string,
+  options?: {
+    limit?: number;
+    offset?: number;
+    classification?: LinkClassification;
+    statusGroup?: "all" | "no_response" | "http_error";
+    includeIgnored?: boolean;
+  },
+): Promise<{
+  links: ScanLink[];
+  countReturned: number;
+  totalMatching: number;
+} | null> {
+  const owned = await isScanRunOwnedByUser(userId, scanRunId);
+  if (!owned) return null;
+  return getScanLinksForRun(scanRunId, options);
+}
+
 /**
  * Get all occurrences of a specific link in a scan run.
  * Used to show "where does this link appear".
@@ -312,6 +371,21 @@ export async function getScanLinksSummary(scanRunId: string): Promise<
   }));
 }
 
+export async function getScanLinksSummaryForUser(
+  userId: string,
+  scanRunId: string,
+): Promise<
+  Array<{
+    classification: LinkClassification;
+    status_code: number | null;
+    count: number;
+  }> | null
+> {
+  const owned = await isScanRunOwnedByUser(userId, scanRunId);
+  if (!owned) return null;
+  return getScanLinksSummary(scanRunId);
+}
+
 export async function getScanLinksForExport(
   scanRunId: string,
   classification: ExportClassification = "all",
@@ -351,6 +425,17 @@ export async function getScanLinksForExport(
   );
 
   return res.rows;
+}
+
+export async function getScanLinksForExportForUser(
+  userId: string,
+  scanRunId: string,
+  classification: ExportClassification = "all",
+  limit = 5000,
+): Promise<ScanLinkExportRow[] | null> {
+  const owned = await isScanRunOwnedByUser(userId, scanRunId);
+  if (!owned) return null;
+  return getScanLinksForExport(scanRunId, classification, limit);
 }
 
 type ExportFilterOptions = {
@@ -483,6 +568,16 @@ export async function getScanLinksForExportFiltered(
   return res.rows;
 }
 
+export async function getScanLinksForExportFilteredForUser(
+  userId: string,
+  scanRunId: string,
+  options: ExportFilterOptions,
+): Promise<ScanLinkExportRow[] | null> {
+  const owned = await isScanRunOwnedByUser(userId, scanRunId);
+  if (!owned) return null;
+  return getScanLinksForExportFiltered(scanRunId, options);
+}
+
 export async function updateScanLinkAfterRecheck(args: {
   scanLinkId: string;
   classification: LinkClassification;
@@ -535,6 +630,17 @@ export async function getTopLinksByClassification(
   return res.rows;
 }
 
+export async function getTopLinksByClassificationForUser(
+  userId: string,
+  scanRunId: string,
+  classification: LinkClassification,
+  limit: number,
+): Promise<ScanLinkExportRow[] | null> {
+  const owned = await isScanRunOwnedByUser(userId, scanRunId);
+  if (!owned) return null;
+  return getTopLinksByClassification(scanRunId, classification, limit);
+}
+
 export async function getTimeoutCountForRun(
   scanRunId: string,
 ): Promise<number> {
@@ -552,6 +658,15 @@ export async function getTimeoutCountForRun(
     [scanRunId],
   );
   return Number(res.rows[0]?.count ?? 0);
+}
+
+export async function getTimeoutCountForRunForUser(
+  userId: string,
+  scanRunId: string,
+): Promise<number | null> {
+  const owned = await isScanRunOwnedByUser(userId, scanRunId);
+  if (!owned) return null;
+  return getTimeoutCountForRun(scanRunId);
 }
 
 export async function getScanLinkByRunAndUrl(
@@ -587,6 +702,16 @@ export async function getScanLinkByRunAndUrl(
   return res.rows[0] ?? null;
 }
 
+export async function getScanLinkByRunAndUrlForUser(
+  userId: string,
+  scanRunId: string,
+  linkUrl: string,
+): Promise<ScanLink | null> {
+  const owned = await isScanRunOwnedByUser(userId, scanRunId);
+  if (!owned) return null;
+  return getScanLinkByRunAndUrl(scanRunId, linkUrl);
+}
+
 export async function getScanLinkById(
   scanLinkId: string,
 ): Promise<ScanLink | null> {
@@ -617,6 +742,15 @@ export async function getScanLinkById(
     [scanLinkId],
   );
   return res.rows[0] ?? null;
+}
+
+export async function getScanLinkByIdForUser(
+  userId: string,
+  scanLinkId: string,
+): Promise<ScanLink | null> {
+  const owned = await getScanLinkOwnership(userId, scanLinkId);
+  if (!owned) return null;
+  return getScanLinkById(scanLinkId);
 }
 
 export async function listScanLinksForIgnore(scanRunId: string): Promise<
@@ -751,4 +885,14 @@ export async function getOccurrencesForScanLink(
     totalMatching,
     occurrences: res.rows,
   };
+}
+
+export async function getOccurrencesForScanLinkForUser(
+  userId: string,
+  scanLinkId: string,
+  options?: { limit?: number; offset?: number },
+): Promise<PaginatedOccurrences | null> {
+  const owned = await getScanLinkOwnership(userId, scanLinkId);
+  if (!owned) return null;
+  return getOccurrencesForScanLink(scanLinkId, options);
 }

@@ -2,17 +2,17 @@ import {
   getLinkCountsForRun,
   getNewLinksSinceLastNotified,
   getPreviousCompletedRunId,
-  getScanRunById,
-  getSiteById,
-  getSiteNotificationSettings,
+  getScanRunByIdForUser,
+  getSiteByIdForUser,
+  getSiteNotificationSettingsForUser,
   hasNotificationEvent,
-  getTimeoutCountForRun,
+  getTimeoutCountForRunForUser,
   markScanRunNotified,
   recordNotificationEvent,
 } from "@link-sentry/db";
 import { sendEmail } from "./email";
 
-const APP_URL = process.env.APP_URL || "http://localhost:3000";
+const APP_URL = process.env.APP_URL || "http://localhost:5173";
 
 function formatCount(value: number) {
   return value === 1 ? "1 link" : `${value} links`;
@@ -37,15 +37,21 @@ function renderLinks(
   return `<h3>${title}</h3><ul>${items}</ul>`;
 }
 
-export async function notifyIfNeeded(scanRunId: string): Promise<void> {
-  const run = await getScanRunById(scanRunId);
+export async function notifyIfNeeded(
+  userId: string,
+  scanRunId: string,
+): Promise<void> {
+  const run = await getScanRunByIdForUser(userId, scanRunId);
   if (!run) return;
   if (run.notified_at) return;
 
-  const site = await getSiteById(run.site_id);
+  const site = await getSiteByIdForUser(userId, run.site_id);
   if (!site) return;
 
-  const settings = await getSiteNotificationSettings(run.site_id);
+  const settings = await getSiteNotificationSettingsForUser(
+    userId,
+    run.site_id,
+  );
   if (!settings || !settings.notifyEnabled) return;
   if (settings.notifyOn === "never") return;
   if (!settings.notifyEmail) return;
@@ -59,7 +65,7 @@ export async function notifyIfNeeded(scanRunId: string): Promise<void> {
   if (alreadySent) return;
 
   if (run.status === "failed") {
-    const subject = `Link-Sentry: ${site.url} — scan failed`;
+    const subject = `Scanlark: ${site.url} — scan failed`;
     const html = `
       <p><strong>Scan failed</strong> for ${site.url}</p>
       <p>Started: ${run.started_at.toISOString()}</p>
@@ -84,7 +90,7 @@ export async function notifyIfNeeded(scanRunId: string): Promise<void> {
   const previousRunId = await getPreviousCompletedRunId(run.site_id, run.id);
   const deltas = await getNewLinksSinceLastNotified(run.id, previousRunId, 50);
   const counts = await getLinkCountsForRun(run.id);
-  const timeoutCount = await getTimeoutCountForRun(run.id);
+  const timeoutCount = await getTimeoutCountForRunForUser(userId, run.id);
 
   const newBrokenCount = deltas.newBroken.length + deltas.newNoResponse.length;
   const newBlockedCount = deltas.newBlocked.length;
@@ -93,7 +99,7 @@ export async function notifyIfNeeded(scanRunId: string): Promise<void> {
     counts.brokenCount + counts.blockedCount + counts.noResponseCount;
   if (settings.notifyOn === "issues" && issueCount === 0) return;
 
-  const subject = `Link-Sentry: ${site.url} — ${counts.brokenCount} broken, ${counts.blockedCount} blocked, ${counts.noResponseCount} no response`;
+  const subject = `Scanlark: ${site.url} — ${counts.brokenCount} broken, ${counts.blockedCount} blocked, ${counts.noResponseCount} no response`;
   const brokenRows = [...deltas.newBroken, ...deltas.newNoResponse];
   const blockedRows = deltas.newBlocked;
 
@@ -127,12 +133,13 @@ export async function notifyIfNeeded(scanRunId: string): Promise<void> {
 }
 
 export async function sendTestEmail(
+  userId: string,
   siteId: string,
   toEmail: string,
 ): Promise<void> {
-  const site = await getSiteById(siteId);
+  const site = await getSiteByIdForUser(userId, siteId);
   if (!site) throw new Error("site_not_found");
-  const subject = `Link-Sentry: test email for ${site.url}`;
+  const subject = `Scanlark: test email for ${site.url}`;
   const html = `
     <p>This is a test email for ${site.url}.</p>
     <p>If you see this, your email settings are working.</p>

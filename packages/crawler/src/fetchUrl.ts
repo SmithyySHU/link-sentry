@@ -1,4 +1,4 @@
-import { HTML_FETCH_TIMEOUT_MS, HTML_USER_AGENT } from "./limits.js";
+import { HTML_FETCH_TIMEOUT_MS, HTML_USER_AGENT } from "./limits";
 import { lookup } from "dns/promises";
 
 const ALLOWED_PROTOCOLS = new Set<string>(["http:", "https:"]);

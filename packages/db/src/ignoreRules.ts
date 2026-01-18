@@ -1,4 +1,4 @@
-import { ensureConnected } from "./client.js";
+import { ensureConnected } from "./client";
 
 export type IgnoreRuleType =
   | "contains"
@@ -11,6 +11,7 @@ export type IgnoreRuleType =
 
 export interface IgnoreRule {
   id: string;
+  user_id: string;
   site_id: string | null;
   rule_type: IgnoreRuleType;
   pattern: string;
@@ -26,7 +27,7 @@ export async function listIgnoreRulesForSite(
   const enabledOnly = opts?.enabledOnly ?? false;
   const res = await client.query<IgnoreRule>(
     `
-      SELECT id, site_id, rule_type, pattern, is_enabled, created_at
+      SELECT id, user_id, site_id, rule_type, pattern, is_enabled, created_at
       FROM ignore_rules
       WHERE site_id = $1 ${enabledOnly ? "AND is_enabled = true" : ""}
       ORDER BY created_at DESC
@@ -51,7 +52,7 @@ export async function listIgnoreRules(
   const enabledOnly = opts?.enabledOnly ?? false;
   if (!siteId) {
     const res = await client.query<IgnoreRule>(
-      `SELECT id, site_id, rule_type, pattern, is_enabled, created_at FROM ignore_rules ${
+      `SELECT id, user_id, site_id, rule_type, pattern, is_enabled, created_at FROM ignore_rules ${
         enabledOnly ? "WHERE is_enabled = true" : ""
       } ORDER BY created_at DESC`,
     );
@@ -60,7 +61,7 @@ export async function listIgnoreRules(
 
   const res = await client.query<IgnoreRule>(
     `
-      SELECT id, site_id, rule_type, pattern, is_enabled, created_at
+      SELECT id, user_id, site_id, rule_type, pattern, is_enabled, created_at
       FROM ignore_rules
       WHERE (site_id = $1 OR site_id IS NULL) ${enabledOnly ? "AND is_enabled = true" : ""}
       ORDER BY created_at DESC
@@ -68,6 +69,79 @@ export async function listIgnoreRules(
     [siteId],
   );
   return res.rows;
+}
+
+export async function listIgnoreRulesForUser(
+  userId: string,
+  opts?: { enabledOnly?: boolean },
+): Promise<IgnoreRule[]> {
+  const client = await ensureConnected();
+  const enabledOnly = opts?.enabledOnly ?? false;
+  const res = await client.query<IgnoreRule>(
+    `
+      SELECT r.id, r.user_id, r.site_id, r.rule_type, r.pattern, r.is_enabled, r.created_at
+      FROM ignore_rules r
+      LEFT JOIN sites s ON s.id = r.site_id
+      WHERE r.user_id = $1
+        ${enabledOnly ? "AND r.is_enabled = true" : ""}
+      ORDER BY r.created_at DESC
+    `,
+    [userId],
+  );
+  return res.rows;
+}
+
+export async function getIgnoreRuleById(
+  ruleId: string,
+): Promise<IgnoreRule | null> {
+  const client = await ensureConnected();
+  const res = await client.query<IgnoreRule>(
+    `
+      SELECT id, user_id, site_id, rule_type, pattern, is_enabled, created_at
+      FROM ignore_rules
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [ruleId],
+  );
+  return res.rows[0] ?? null;
+}
+
+export async function listIgnoreRulesForSiteForUser(
+  userId: string,
+  siteId: string,
+  opts?: { enabledOnly?: boolean },
+): Promise<IgnoreRule[]> {
+  const client = await ensureConnected();
+  const enabledOnly = opts?.enabledOnly ?? false;
+  const res = await client.query<IgnoreRule>(
+    `
+      SELECT id, user_id, site_id, rule_type, pattern, is_enabled, created_at
+      FROM ignore_rules
+      WHERE user_id = $1 AND (site_id = $2 OR site_id IS NULL)
+        ${enabledOnly ? "AND is_enabled = true" : ""}
+      ORDER BY created_at DESC
+    `,
+    [userId, siteId],
+  );
+  return res.rows;
+}
+
+export async function getIgnoreRuleByIdForUser(
+  userId: string,
+  ruleId: string,
+): Promise<IgnoreRule | null> {
+  const client = await ensureConnected();
+  const res = await client.query<IgnoreRule>(
+    `
+      SELECT id, user_id, site_id, rule_type, pattern, is_enabled, created_at
+      FROM ignore_rules
+      WHERE id = $1 AND user_id = $2
+      LIMIT 1
+    `,
+    [ruleId, userId],
+  );
+  return res.rows[0] ?? null;
 }
 
 export function findMatchingIgnoreRule(
@@ -147,6 +221,7 @@ export function findMatchingIgnoreRule(
 }
 
 export async function createIgnoreRule(
+  userId: string,
   siteId: string | null,
   ruleType: IgnoreRuleType,
   pattern: string,
@@ -154,11 +229,11 @@ export async function createIgnoreRule(
   const client = await ensureConnected();
   const res = await client.query<IgnoreRule>(
     `
-      INSERT INTO ignore_rules (site_id, rule_type, pattern)
-      VALUES ($1, $2, $3)
-      RETURNING id, site_id, rule_type, pattern, is_enabled, created_at
+      INSERT INTO ignore_rules (user_id, site_id, rule_type, pattern)
+      VALUES ($1, $2, $3, $4)
+      RETURNING id, user_id, site_id, rule_type, pattern, is_enabled, created_at
     `,
-    [siteId, ruleType, pattern],
+    [userId, siteId, ruleType, pattern],
   );
   return res.rows[0];
 }
@@ -178,7 +253,7 @@ export async function setIgnoreRuleEnabled(
       UPDATE ignore_rules
       SET is_enabled = $2
       WHERE id = $1
-      RETURNING id, site_id, rule_type, pattern, is_enabled, created_at
+      RETURNING id, user_id, site_id, rule_type, pattern, is_enabled, created_at
     `,
     [ruleId, enabled],
   );

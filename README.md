@@ -1,9 +1,8 @@
-````md
-# Link-Sentry
+# Scanlark
 
 Automated broken-link monitoring for websites.
 
-Link-Sentry is a work-in-progress SaaS-style app that scans websites to detect broken/blocked links (internal + external), stores results, and presents them in a dashboard. The goal is **reliable monitoring** and a clean workflow—not a full SEO suite.
+Scanlark is a work-in-progress SaaS-style app that scans websites to detect broken/blocked links (internal + external), stores results, and presents them in a dashboard. The goal is **reliable monitoring** and a clean workflow—not a full SEO suite.
 
 ---
 
@@ -11,7 +10,7 @@ Link-Sentry is a work-in-progress SaaS-style app that scans websites to detect b
 
 Broken links hurt user experience, trust, and SEO. Many site owners only notice once users complain.
 
-Link-Sentry aims to make link monitoring a background task that runs automatically and surfaces clear, actionable results.
+Scanlark aims to make link monitoring a background task that runs automatically and surfaces clear, actionable results.
 
 ---
 
@@ -72,6 +71,7 @@ packages/
   crawler/    # crawling + validation + classification
   db/         # SQL migrations + query layer
 ```
+
 ````
 
 ---
@@ -83,11 +83,27 @@ packages/
 - Node.js (see `.nvmrc` if present)
 - PostgreSQL
 - `DATABASE_URL` set (API + scripts use it)
+- Auth (beta gate):
+  - `DEV_BYPASS_AUTH=true` auto-auths the demo user in dev
+  - `AUTH_COOKIE_NAME`, `SESSION_SECRET` (required when bypass is off), `WEB_ORIGIN`, `API_ORIGIN`
+  - TODO: replace with a hosted auth provider before public release
+- Worker notify:
+  - `API_INTERNAL_TOKEN` must match between API and worker so scheduled scans can trigger notifications
 - Email (optional):
   - `EMAIL_ENABLED=true`
   - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`
   - `EMAIL_FROM` (optional)
   - `EMAIL_TEST_TO` (optional override for test emails)
+
+### Realtime updates (SSE)
+
+The dashboard subscribes to `/events/stream` for scan + schedule updates. To test
+scheduled scan UI updates locally:
+
+- Open the dashboard and enable a schedule for a site 1–2 minutes ahead.
+- Keep the page open; you should see the scan move to in-progress and complete
+  without a refresh.
+- If you switch tabs, the UI syncs once when you return.
 
 ### 2) Install
 
@@ -102,6 +118,9 @@ npm ci
 psql "$DATABASE_URL" -f packages/db/migrations/001_add_dedup_tables.sql
 psql "$DATABASE_URL" -f packages/db/migrations/002_<your_next_migration>.sql
 psql "$DATABASE_URL" -f packages/db/migrations/003_add_ignore_rules.sql
+psql "$DATABASE_URL" -f packages/db/migrations/004_add_users_auth_and_ownership.sql
+psql "$DATABASE_URL" -f packages/db/migrations/005_fix_users_updated_at.sql
+psql "$DATABASE_URL" -f packages/db/migrations/006_add_ignore_rules_user_id.sql
 ```
 
 ### 4) Start the apps
@@ -132,7 +151,6 @@ Note: `npm --workspaces run build` may print a Vite CJS deprecation warning; the
 - Better scan progress reporting (UI progress indicator + streaming updates)
 - More filters (status-code groups, timeouts, ignored)
 - Export (CSV), copy actions, bulk ignore, retry scan
-- Authentication + user accounts (UI placeholders already planned)
 - Scheduling / recurring scans + notifications (email)
 
 ---
@@ -144,3 +162,4 @@ This repository is under active development and will change as the MVP gets hard
 ```
 
 ```
+````

@@ -1,4 +1,4 @@
-import { runScanForSite } from "./scanService.js";
+import { runScanForSite } from "./scanService";
 
 async function main(): Promise<void> {
   const [siteId, startUrl] = process.argv.slice(2);

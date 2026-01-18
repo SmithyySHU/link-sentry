@@ -1,6 +1,6 @@
 import { createHash } from "crypto";
-import { ensureConnected } from "./client.js";
-import type { IgnoreRule } from "./ignoreRules.js";
+import { ensureConnected } from "./client";
+import type { IgnoreRule } from "./ignoreRules";
 
 const RULE_SORT = (a: IgnoreRule, b: IgnoreRule) => {
   if (a.rule_type !== b.rule_type)
@@ -36,22 +36,30 @@ export async function applyIgnoreRulesForScanRun(
   }
 
   try {
-    const runRes = await client.query<{ site_id: string }>(
-      `SELECT site_id FROM scan_runs WHERE id = $1`,
+    const runRes = await client.query<{ site_id: string; user_id: string }>(
+      `
+        SELECT r.site_id, s.user_id
+        FROM scan_runs r
+        JOIN sites s ON s.id = r.site_id
+        WHERE r.id = $1
+      `,
       [scanRunId],
     );
     const siteId = runRes.rows[0]?.site_id;
-    if (!siteId) {
+    const userId = runRes.rows[0]?.user_id;
+    if (!siteId || !userId) {
       return { applied: false, ignoredCount: 0, rulesHash: "" };
     }
 
     const rulesRes = await client.query<IgnoreRule>(
       `
-        SELECT id, site_id, rule_type, pattern, is_enabled, created_at
+        SELECT id, user_id, site_id, rule_type, pattern, is_enabled, created_at
         FROM ignore_rules
-        WHERE site_id = $1 AND is_enabled = true
+        WHERE user_id = $2
+          AND (site_id = $1 OR site_id IS NULL)
+          AND is_enabled = true
       `,
-      [siteId],
+      [siteId, userId],
     );
 
     const rules = rulesRes.rows;

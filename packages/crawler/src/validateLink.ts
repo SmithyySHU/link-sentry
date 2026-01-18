@@ -52,7 +52,7 @@ export default async function validateLink(
 ): Promise<LinkCheckResult> {
   const timeoutMs = options?.timeoutMs ?? 12_000;
   const userAgent =
-    options?.userAgent ?? "Link-SentryBot/0.1 (+https://link-sentry.dev)";
+    options?.userAgent ?? "ScanlarkBot/0.1 (+https://scanlark.dev)";
 
   const controller = new AbortController();
   let timedOut = false;

@@ -1,3 +1,4 @@
+import dotenv from "dotenv";
 import express from "express";
 import type { Response } from "express";
 import cors from "cors";
@@ -11,54 +12,61 @@ import {
   applyIgnoreRulesForScanRun,
   cancelScanJob,
   cancelScanRun,
+  createSiteForUser,
   createIgnoreRule,
   createScanRun,
   deleteIgnoreRule,
+  deleteSiteForUser,
   enqueueScanJob,
-  getDiffBetweenRuns,
+  getDiffBetweenRunsForUser,
   getJobForScanRun,
-  getLatestScanForSite,
-  getOccurrencesForScanLink,
-  getRecentScanRunsForSite,
-  getRecentScansForSite,
-  getResultsForScanRun,
-  getResultsSummaryForScanRun,
-  getScanLinkById,
-  getScanLinkByRunAndUrl,
-  getScanLinksForExport,
-  getScanLinksForExportFiltered,
-  getScanLinksForRun,
-  getScanLinksSummary,
+  getLatestScanForSiteForUser,
+  getOccurrencesForScanLinkForUser,
+  getRecentScanRunsForSiteForUser,
+  getRecentScansForSiteForUser,
+  getResultsForScanRunForUser,
+  getResultsSummaryForScanRunForUser,
+  getScanLinkByIdForUser,
+  getScanLinkByRunAndUrlForUser,
+  getScanLinksForExportFilteredForUser,
+  getScanLinksForExportForUser,
+  getScanLinksForRunForUser,
+  getScanLinksSummaryForUser,
+  getScanRunByIdForUser,
   getScanRunById,
+  getSiteByIdForUser,
   getSiteById,
-  getSiteNotificationSettings,
-  getSitesForUser,
-  getSiteSchedule,
-  getTimeoutCountForRun,
-  getTopLinksByClassification,
+  getSiteNotificationSettingsForUser,
+  listSitesForUser,
+  getSiteScheduleForUser,
+  getTimeoutCountForRunForUser,
+  getTopLinksByClassificationForUser,
   insertIgnoredOccurrence,
-  listIgnoreRules,
-  listIgnoreRulesForSite,
-  listIgnoredLinksForRun,
-  listIgnoredOccurrences,
+  getIgnoreRuleByIdForUser,
+  listIgnoreRulesForUser,
+  listIgnoreRulesForSiteForUser,
+  listIgnoredLinksForRunForUser,
+  listIgnoredOccurrencesForUser,
   setIgnoreRuleEnabled,
   setScanLinkIgnoredForRun,
   setScanRunStatus,
-  updateSiteNotificationSettings,
-  updateSiteSchedule,
+  updateSiteNotificationSettingsForUser,
+  updateSiteScheduleForUser,
   updateScanLinkAfterRecheck,
   upsertIgnoredLink,
-  createSite,
-  deleteSite,
 } from "@link-sentry/db";
-import validateLink from "../../../packages/crawler/src/validateLink.js";
-import { classifyStatus } from "../../../packages/crawler/src/classifyStatus.js";
-
+import validateLink from "../../../packages/crawler/src/validateLink";
+import { classifyStatus } from "../../../packages/crawler/src/classifyStatus";
 import { mountScanRunEvents } from "./routes/scanRunEvents";
 import { serializeScanRun } from "./serializers";
 import { notifyIfNeeded, sendTestEmail } from "./notifyOnScanComplete";
+import { authMiddleware, initDemoAuth } from "./authMiddleware";
+import { sessionMiddleware } from "./auth";
+import { mountAuthRoutes } from "./routes/auth";
+import { initEventRelay, mountEventStream } from "./events";
 
-const DEMO_USER_ID = "00000000-0000-0000-0000-000000000000";
+dotenv.config({ path: new URL("../../../.env", import.meta.url) });
+
 const LINK_CLASSIFICATIONS = new Set<LinkClassification>([
   "ok",
   "broken",
@@ -85,6 +93,7 @@ const EXPORT_SORT_OPTIONS = new Set([
 const SCHEDULE_FREQUENCIES = new Set(["daily", "weekly"]);
 const NOTIFY_ON_OPTIONS = new Set(["always", "issues", "never"]);
 const EMAIL_TEST_TO = process.env.EMAIL_TEST_TO;
+const API_INTERNAL_TOKEN = process.env.API_INTERNAL_TOKEN;
 
 function isValidTimeUtc(value: string) {
   const parts = value.split(":");
@@ -195,6 +204,46 @@ function sendInternalError(res: Response, message: string, err?: unknown) {
   );
 }
 
+function sendNotFound(res: Response) {
+  return sendApiError(res, 404, "not_found", "Not found");
+}
+
+async function requireSiteForUser(
+  req: express.Request,
+  res: express.Response,
+  siteId: string,
+) {
+  const userId = req.user?.id;
+  if (!userId) {
+    sendApiError(res, 401, "unauthorized", "Unauthorized");
+    return null;
+  }
+  const site = await getSiteByIdForUser(userId, siteId);
+  if (!site) {
+    sendNotFound(res);
+    return null;
+  }
+  return site;
+}
+
+async function requireScanRunForUser(
+  req: express.Request,
+  res: express.Response,
+  scanRunId: string,
+) {
+  const userId = req.user?.id;
+  if (!userId) {
+    sendApiError(res, 401, "unauthorized", "Unauthorized");
+    return null;
+  }
+  const run = await getScanRunByIdForUser(userId, scanRunId);
+  if (!run) {
+    sendNotFound(res);
+    return null;
+  }
+  return { run };
+}
+
 function parseShowIgnored(value: unknown): boolean {
   return value === "true" || value === "1";
 }
@@ -206,20 +255,60 @@ function csvEscape(value: unknown): string {
 
 const app = express();
 
-app.use(cors());
-app.use(express.json());
+const corsOrigins = new Set(
+  [process.env.WEB_ORIGIN, "http://localhost:5173", "http://localhost:3000"]
+    .filter(Boolean)
+    .map((origin) => origin as string),
+);
 
-mountScanRunEvents(app);
+const corsOptions: cors.CorsOptions = {
+  origin(origin, callback) {
+    if (!origin) return callback(null, true);
+    if (corsOrigins.has(origin)) return callback(null, true);
+    return callback(new Error("Not allowed by CORS"));
+  },
+  credentials: true,
+};
+
+app.set("trust proxy", 1);
+app.options("*", cors(corsOptions));
+app.use(cors(corsOptions));
+app.use(express.json());
+app.use(sessionMiddleware);
+
+if (process.env.DEV_BYPASS_AUTH === "true") {
+  void initDemoAuth();
+}
+
+mountAuthRoutes(app);
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "link-sentry-api" });
+  res.json({ status: "ok", service: "scanlark-api" });
 });
 
-// List sites for a (temporary) demo user
+app.use(authMiddleware);
+
+mountEventStream(app);
+mountScanRunEvents(app);
+
+app.get("/me", (req, res) => {
+  if (!req.user) {
+    return sendApiError(res, 401, "unauthorized", "Unauthorized");
+  }
+  return res.json({
+    id: req.user.id,
+    email: req.user.email,
+    name: req.user.name,
+  });
+});
+
 app.get("/sites", async (req, res) => {
   try {
-    const userId = (req.query.userId as string) ?? DEMO_USER_ID;
-    const sites = await getSitesForUser(userId);
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const sites = await listSitesForUser(userId);
 
     res.json({
       userId,
@@ -235,9 +324,13 @@ app.get("/sites", async (req, res) => {
 app.get("/sites/:siteId/schedule", async (req, res) => {
   const siteId = req.params.siteId;
   try {
-    const schedule = await getSiteSchedule(siteId);
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const schedule = await getSiteScheduleForUser(userId, siteId);
     if (!schedule) {
-      return sendApiError(res, 404, "site_not_found", "Site not found");
+      return sendNotFound(res);
     }
     res.json({ siteId, ...schedule });
   } catch (err: unknown) {
@@ -279,7 +372,11 @@ app.put("/sites/:siteId/schedule", async (req, res) => {
   }
 
   try {
-    const schedule = await updateSiteSchedule(siteId, {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const schedule = await updateSiteScheduleForUser(userId, siteId, {
       scheduleEnabled: enabled,
       scheduleFrequency: frequencyValue,
       scheduleTimeUtc: timeUtc,
@@ -298,9 +395,13 @@ async function handleGetNotificationSettings(
 ) {
   const siteId = req.params.siteId;
   try {
-    const settings = await getSiteNotificationSettings(siteId);
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const settings = await getSiteNotificationSettingsForUser(userId, siteId);
     if (!settings) {
-      return sendApiError(res, 404, "site_not_found", "Site not found");
+      return sendNotFound(res);
     }
     res.json({ siteId, ...settings });
   } catch (err: unknown) {
@@ -371,11 +472,19 @@ async function handlePatchNotificationSettings(
   }
 
   try {
-    const updated = await updateSiteNotificationSettings(siteId, patch);
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const updated = await updateSiteNotificationSettingsForUser(
+      userId,
+      siteId,
+      patch,
+    );
     res.json({ siteId, ...updated });
   } catch (err: unknown) {
     if (err instanceof Error && err.message === "site_not_found") {
-      return sendApiError(res, 404, "site_not_found", "Site not found");
+      return sendNotFound(res);
     }
     if (err instanceof Error && err.message === "invalid_notify_email") {
       return sendApiError(
@@ -409,9 +518,15 @@ app.put("/sites/:siteId/notifications", async (req, res) => {
 app.post("/sites/:siteId/notifications/test", async (req, res) => {
   const siteId = req.params.siteId;
   try {
-    const settings = await getSiteNotificationSettings(siteId);
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const settings = await getSiteNotificationSettingsForUser(userId, siteId);
     if (!settings) {
-      return sendApiError(res, 404, "site_not_found", "Site not found");
+      return sendNotFound(res);
     }
     const target = EMAIL_TEST_TO || settings.notifyEmail;
     if (!target) {
@@ -422,7 +537,7 @@ app.post("/sites/:siteId/notifications/test", async (req, res) => {
         "notify_email is required",
       );
     }
-    await sendTestEmail(siteId, target);
+    await sendTestEmail(userId, siteId, target);
     res.json({ ok: true });
   } catch (err: unknown) {
     console.error("Error in POST /sites/:siteId/notifications/test", err);
@@ -433,11 +548,34 @@ app.post("/sites/:siteId/notifications/test", async (req, res) => {
 app.post("/scan-runs/:scanRunId/notify", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   try {
-    const run = await getScanRunById(scanRunId);
-    if (!run) {
-      return sendApiError(res, 404, "scan_run_not_found", "Scan run not found");
+    let userId = req.user?.id;
+    let run = null;
+
+    if (!userId) {
+      const internalToken =
+        typeof req.headers["x-internal-token"] === "string"
+          ? req.headers["x-internal-token"]
+          : "";
+      if (!API_INTERNAL_TOKEN || internalToken !== API_INTERNAL_TOKEN) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
+      const internalRun = await getScanRunById(scanRunId);
+      if (!internalRun) {
+        return sendNotFound(res);
+      }
+      const site = await getSiteById(internalRun.site_id);
+      if (!site || !site.user_id) {
+        return sendNotFound(res);
+      }
+      userId = site.user_id;
+      run = internalRun;
+    } else {
+      const result = await requireScanRunForUser(req, res, scanRunId);
+      if (!result) return;
+      run = result.run;
     }
-    await notifyIfNeeded(scanRunId);
+
+    await notifyIfNeeded(userId, scanRunId);
     res.json({ ok: true, status: run.status });
   } catch (err: unknown) {
     console.error("Error in POST /scan-runs/:scanRunId/notify", err);
@@ -461,7 +599,13 @@ app.get("/sites/:siteId/scans", async (req, res) => {
   }
 
   try {
-    const scans = await getRecentScansForSite(siteId, limit);
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const scans = await getRecentScansForSiteForUser(userId, siteId, limit);
 
     res.json({
       siteId,
@@ -490,7 +634,13 @@ app.get("/sites/:siteId/scan-runs", async (req, res) => {
   }
 
   try {
-    const runs = await getRecentScanRunsForSite(siteId, limit);
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const runs = await getRecentScanRunsForSiteForUser(userId, siteId, limit);
     res.json({
       siteId,
       runs: runs.map(serializeScanRun),
@@ -506,15 +656,16 @@ app.get("/sites/:siteId/scans/latest", async (req, res) => {
   const siteId = req.params.siteId;
 
   try {
-    const latest = await getLatestScanForSite(siteId);
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const latest = await getLatestScanForSiteForUser(userId, siteId);
 
     if (!latest) {
-      return sendApiError(
-        res,
-        404,
-        "no_scans_for_site",
-        `No scans found for site ${siteId}`,
-      );
+      return sendNotFound(res);
     }
 
     res.json(serializeScanRun(latest));
@@ -529,16 +680,9 @@ app.get("/scan-runs/:scanRunId", async (req, res) => {
   const scanRunId = req.params.scanRunId;
 
   try {
-    const run = await getScanRunById(scanRunId);
-
-    if (!run) {
-      return sendApiError(
-        res,
-        404,
-        "scan_run_not_found",
-        `No scan run found with id ${scanRunId}`,
-      );
-    }
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const { run } = result;
 
     const serialized = serializeScanRun(run);
     return res.json(serialized);
@@ -553,20 +697,18 @@ app.get("/scan-runs/:scanRunId/report", async (req, res) => {
   const scanRunId = req.params.scanRunId;
 
   try {
-    const run = await getScanRunById(scanRunId);
-    if (!run) {
-      return sendApiError(
-        res,
-        404,
-        "scan_run_not_found",
-        `No scan run found with id ${scanRunId}`,
-      );
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const { run } = result;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
     }
 
     await applyIgnoreRulesForScanRun(scanRunId);
 
-    const summaryRows = await getScanLinksSummary(scanRunId);
-    const timeoutCount = await getTimeoutCountForRun(scanRunId);
+    const summaryRows = await getScanLinksSummaryForUser(userId, scanRunId);
+    const timeoutCount = await getTimeoutCountForRunForUser(userId, scanRunId);
     const byClassification: Record<string, number> = {
       ok: 0,
       broken: 0,
@@ -599,12 +741,14 @@ app.get("/scan-runs/:scanRunId/report", async (req, res) => {
           : row.last_seen_at,
     });
 
-    const topBroken = await getTopLinksByClassification(
+    const topBroken = await getTopLinksByClassificationForUser(
+      userId,
       scanRunId,
       "broken",
       20,
     );
-    const topBlocked = await getTopLinksByClassification(
+    const topBlocked = await getTopLinksByClassificationForUser(
+      userId,
       scanRunId,
       "blocked",
       20,
@@ -628,6 +772,8 @@ app.get("/scan-runs/:scanRunId/report", async (req, res) => {
 app.post("/scan-runs/:scanRunId/cancel", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
     const job = await getJobForScanRun(scanRunId);
     if (job && job.status !== "completed") {
       await cancelScanJob(job.id);
@@ -643,10 +789,9 @@ app.post("/scan-runs/:scanRunId/cancel", async (req, res) => {
 app.post("/scan-runs/:scanRunId/retry", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   try {
-    const run = await getScanRunById(scanRunId);
-    if (!run) {
-      return sendApiError(res, 404, "scan_run_not_found", "Scan run not found");
-    }
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const { run } = result;
     if (run.status !== "failed" && run.status !== "cancelled") {
       return sendApiError(
         res,
@@ -673,14 +818,17 @@ app.post("/scan-runs/:scanRunId/retry", async (req, res) => {
 // Create a new site
 app.post("/sites", async (req, res) => {
   try {
-    const userId = (req.body.userId as string) ?? DEMO_USER_ID;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
     const url = req.body.url as string | undefined;
 
     if (!url) {
       return sendApiError(res, 400, "missing_url", "Missing 'url' in body");
     }
 
-    const site = await createSite(userId, url);
+    const site = await createSiteForUser(userId, url);
 
     res.status(201).json({ site });
   } catch (err: unknown) {
@@ -704,6 +852,8 @@ app.post("/sites/:siteId/scans", async (req, res) => {
   }
 
   try {
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
     const scanRunId = await createScanRun(siteId, body.startUrl);
     const jobId = await enqueueScanJob({ scanRunId, siteId });
 
@@ -749,11 +899,21 @@ app.get("/scan-runs/:scanRunId/results", async (req, res) => {
   }
 
   try {
-    const paginatedResults = await getResultsForScanRun(scanRunId, {
-      limit,
-      offset,
-      classification,
-    });
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const paginatedResults = await getResultsForScanRunForUser(
+      userId,
+      scanRunId,
+      {
+        limit,
+        offset,
+        classification,
+      },
+    );
 
     res.json({
       scanRunId,
@@ -773,7 +933,13 @@ app.get("/scan-runs/:scanRunId/results/summary", async (req, res) => {
   const scanRunId = req.params.scanRunId;
 
   try {
-    const summary = await getResultsSummaryForScanRun(scanRunId);
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const summary = await getResultsSummaryForScanRunForUser(userId, scanRunId);
 
     res.json({
       scanRunId,
@@ -789,7 +955,13 @@ app.get("/scan-runs/:scanRunId/results/summary", async (req, res) => {
 app.get("/scan-runs/:scanRunId/links/summary", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   try {
-    const summary = await getScanLinksSummary(scanRunId);
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const summary = await getScanLinksSummaryForUser(userId, scanRunId);
     const noResponse = summary
       .filter((row) => row.status_code == null)
       .reduce((acc, row) => acc + row.count, 0);
@@ -836,6 +1008,12 @@ app.get("/scan-runs/:scanRunId/links/export.csv", async (req, res) => {
   }
 
   try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
     await applyIgnoreRulesForScanRun(scanRunId);
     const statusGroup = parseStatusGroup(statusGroupRaw);
     const statusFilters = parseStatusFilters(statusFiltersRaw);
@@ -853,7 +1031,7 @@ app.get("/scan-runs/:scanRunId/links/export.csv", async (req, res) => {
       showIgnoredRaw ||
       ignoredOnlyRaw;
     const rows = useFiltered
-      ? await getScanLinksForExportFiltered(scanRunId, {
+      ? await getScanLinksForExportFilteredForUser(userId, scanRunId, {
           classification,
           statusGroup,
           statusFilters,
@@ -864,7 +1042,12 @@ app.get("/scan-runs/:scanRunId/links/export.csv", async (req, res) => {
           ignoredOnly,
           limit,
         })
-      : await getScanLinksForExport(scanRunId, classification, limit);
+      : await getScanLinksForExportForUser(
+          userId,
+          scanRunId,
+          classification,
+          limit,
+        );
     const dateStamp = new Date().toISOString().split("T")[0];
     const filename = `scan-links-${scanRunId}-${classification}-${dateStamp}.csv`;
     const header = [
@@ -942,6 +1125,12 @@ app.get("/scan-runs/:scanRunId/links/export.json", async (req, res) => {
   }
 
   try {
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
     await applyIgnoreRulesForScanRun(scanRunId);
     const statusGroup = parseStatusGroup(statusGroupRaw);
     const statusFilters = parseStatusFilters(statusFiltersRaw);
@@ -959,7 +1148,7 @@ app.get("/scan-runs/:scanRunId/links/export.json", async (req, res) => {
       showIgnoredRaw ||
       ignoredOnlyRaw;
     const rows = useFiltered
-      ? await getScanLinksForExportFiltered(scanRunId, {
+      ? await getScanLinksForExportFilteredForUser(userId, scanRunId, {
           classification,
           statusGroup,
           statusFilters,
@@ -970,7 +1159,12 @@ app.get("/scan-runs/:scanRunId/links/export.json", async (req, res) => {
           ignoredOnly,
           limit,
         })
-      : await getScanLinksForExport(scanRunId, classification, limit);
+      : await getScanLinksForExportForUser(
+          userId,
+          scanRunId,
+          classification,
+          limit,
+        );
     const dateStamp = new Date().toISOString().split("T")[0];
     const filename = `scan-links-${scanRunId}-${classification}-${dateStamp}.json`;
     const payload = rows.map((row) => ({
@@ -1009,7 +1203,13 @@ app.get("/scan-runs/:scanRunId/diff", async (req, res) => {
   }
 
   try {
-    const diff = await getDiffBetweenRuns(scanRunId, compareTo);
+    const result = await requireScanRunForUser(req, res, scanRunId);
+    if (!result) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const diff = await getDiffBetweenRunsForUser(userId, scanRunId, compareTo);
     const serializeRow = (row: { last_seen_at: Date }) => ({
       ...row,
       last_seen_at:
@@ -1064,8 +1264,19 @@ app.get("/scan-runs/:scanRunId/ignored", async (req, res) => {
   }
 
   try {
-    const result = await listIgnoredLinksForRun(scanRunId, limit, offset);
-    const serialized = result.links.map((link) => ({
+    const runCheck = await requireScanRunForUser(req, res, scanRunId);
+    if (!runCheck) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const ignoredResult = await listIgnoredLinksForRunForUser(
+      userId,
+      scanRunId,
+      limit,
+      offset,
+    );
+    const serialized = ignoredResult.links.map((link) => ({
       ...link,
       first_seen_at:
         link.first_seen_at instanceof Date
@@ -1082,8 +1293,8 @@ app.get("/scan-runs/:scanRunId/ignored", async (req, res) => {
     }));
     res.json({
       scanRunId,
-      countReturned: result.countReturned,
-      totalMatching: result.totalMatching,
+      countReturned: ignoredResult.countReturned,
+      totalMatching: ignoredResult.totalMatching,
       links: serialized,
     });
   } catch (err: unknown) {
@@ -1122,7 +1333,18 @@ app.get(
     }
 
     try {
-      const result = await listIgnoredOccurrences(ignoredLinkId, limit, offset);
+      const runCheck = await requireScanRunForUser(req, res, scanRunId);
+      if (!runCheck) return;
+      const userId = req.user?.id;
+      if (!userId) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
+      const result = await listIgnoredOccurrencesForUser(
+        userId,
+        ignoredLinkId,
+        limit,
+        offset,
+      );
       const serialized = result.occurrences.map((occ) => ({
         ...occ,
         created_at:
@@ -1182,9 +1404,15 @@ app.get("/scan-runs/:scanRunId/links", async (req, res) => {
   }
 
   try {
+    const runCheck = await requireScanRunForUser(req, res, scanRunId);
+    if (!runCheck) return;
     await applyIgnoreRulesForScanRun(scanRunId);
 
-    const paginatedLinks = await getScanLinksForRun(scanRunId, {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const paginatedLinks = await getScanLinksForRunForUser(userId, scanRunId, {
       limit,
       offset,
       classification,
@@ -1263,11 +1491,24 @@ app.get(
     }
 
     try {
+      const runCheck = await requireScanRunForUser(req, res, scanRunId);
+      if (!runCheck) return;
       const linkUrl = decodeURIComponent(encodedLinkUrl);
-      const scanLink = await getScanLinkByRunAndUrl(scanRunId, linkUrl);
+      const userId = req.user?.id;
+      if (!userId) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
+      const scanLink = await getScanLinkByRunAndUrlForUser(
+        userId,
+        scanRunId,
+        linkUrl,
+      );
       const scanLinkId = scanLink?.id;
       const paginatedOccurrences = scanLinkId
-        ? await getOccurrencesForScanLink(scanLinkId, { limit, offset })
+        ? await getOccurrencesForScanLinkForUser(userId, scanLinkId, {
+            limit,
+            offset,
+          })
         : {
             scanLinkId: scanLinkId ?? "",
             countReturned: 0,
@@ -1341,7 +1582,15 @@ app.get("/scan-links/:scanLinkId/occurrences", async (req, res) => {
   }
 
   try {
-    const result = await getOccurrencesForScanLink(scanLinkId, {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const link = await getScanLinkByIdForUser(userId, scanLinkId);
+    if (!link) {
+      return sendNotFound(res);
+    }
+    const result = await getOccurrencesForScanLinkForUser(userId, scanLinkId, {
       limit,
       offset,
     });
@@ -1370,14 +1619,13 @@ app.get("/scan-links/:scanLinkId/occurrences", async (req, res) => {
 app.post("/scan-links/:scanLinkId/recheck", async (req, res) => {
   const scanLinkId = req.params.scanLinkId;
   try {
-    const link = await getScanLinkById(scanLinkId);
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const link = await getScanLinkByIdForUser(userId, scanLinkId);
     if (!link) {
-      return sendApiError(
-        res,
-        404,
-        "scan_link_not_found",
-        "Scan link not found",
-      );
+      return sendNotFound(res);
     }
     if (link.ignored) {
       return sendApiError(
@@ -1441,9 +1689,13 @@ app.post("/scan-links/:scanLinkId/recheck", async (req, res) => {
 });
 
 // Ignore rules (global list)
-app.get("/ignore-rules", async (_req, res) => {
+app.get("/ignore-rules", async (req, res) => {
   try {
-    const rules = await listIgnoreRules();
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const rules = await listIgnoreRulesForUser(userId);
     res.json({ count: rules.length, rules });
   } catch (err: unknown) {
     console.error("Error in GET /ignore-rules", err);
@@ -1469,7 +1721,15 @@ app.post("/ignore-rules", async (req, res) => {
   }
 
   try {
-    const rule = await createIgnoreRule(siteId, ruleType, pattern);
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    if (siteId) {
+      const site = await requireSiteForUser(req, res, siteId);
+      if (!site) return;
+    }
+    const rule = await createIgnoreRule(userId, siteId, ruleType, pattern);
     if (!enabled) {
       const updated = await setIgnoreRuleEnabled(rule.id, false);
       return res.status(201).json({ rule: updated ?? rule });
@@ -1485,7 +1745,13 @@ app.post("/ignore-rules", async (req, res) => {
 app.get("/sites/:siteId/ignore-rules", async (req, res) => {
   const siteId = req.params.siteId;
   try {
-    const rules = await listIgnoreRules(siteId);
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const rules = await listIgnoreRulesForSiteForUser(userId, siteId);
     res.json({ siteId, count: rules.length, rules });
   } catch (err: unknown) {
     console.error("Error in GET /sites/:siteId/ignore-rules", err);
@@ -1518,7 +1784,14 @@ app.post("/sites/:siteId/ignore-rules", async (req, res) => {
   }
 
   try {
+    const site = await requireSiteForUser(req, res, siteId);
+    if (!site) return;
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
     const rule = await createIgnoreRule(
+      userId,
       scope === "global" ? null : siteId,
       ruleType,
       pattern,
@@ -1542,15 +1815,23 @@ app.patch("/ignore-rules/:ruleId", async (req, res) => {
     );
   }
   try {
-    const rule = await setIgnoreRuleEnabled(ruleId, isEnabled);
-    if (!rule)
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const existingRule = await getIgnoreRuleByIdForUser(userId, ruleId);
+    if (!existingRule) {
+      return sendNotFound(res);
+    }
+    const updatedRule = await setIgnoreRuleEnabled(ruleId, isEnabled);
+    if (!updatedRule)
       return sendApiError(
         res,
         404,
         "ignore_rule_not_found",
         "Ignore rule not found",
       );
-    res.json({ rule });
+    res.json({ rule: updatedRule });
   } catch (err: unknown) {
     console.error("Error in PATCH /ignore-rules/:ruleId", err);
     return sendInternalError(res, "Failed to update ignore rule", err);
@@ -1560,6 +1841,14 @@ app.patch("/ignore-rules/:ruleId", async (req, res) => {
 app.delete("/ignore-rules/:ruleId", async (req, res) => {
   const ruleId = req.params.ruleId;
   try {
+    const userId = req.user?.id;
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const rule = await getIgnoreRuleByIdForUser(userId, ruleId);
+    if (!rule) {
+      return sendNotFound(res);
+    }
     await deleteIgnoreRule(ruleId);
     res.status(204).send();
   } catch (err: unknown) {
@@ -1587,21 +1876,24 @@ app.post(
     }
 
     try {
-      const run = await getScanRunById(scanRunId);
-      if (!run)
-        return sendApiError(
-          res,
-          404,
-          "scan_run_not_found",
-          "Scan run not found",
-        );
+      const runCheck = await requireScanRunForUser(req, res, scanRunId);
+      if (!runCheck) return;
+      const { run } = runCheck;
+      const userId = req.user?.id;
+      if (!userId) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
 
       if (mode === "this_scan") {
         await setScanLinkIgnoredForRun(scanRunId, linkUrl, true, {
           reason: "Manually ignored",
           source: "manual",
         });
-        const scanLink = await getScanLinkByRunAndUrl(scanRunId, linkUrl);
+        const scanLink = await getScanLinkByRunAndUrlForUser(
+          userId,
+          scanRunId,
+          linkUrl,
+        );
         if (scanLink) {
           const ignored = await upsertIgnoredLink({
             scanRunId,
@@ -1610,10 +1902,14 @@ app.post(
             statusCode: scanLink.status_code,
             errorMessage: scanLink.error_message ?? undefined,
           });
-          const occ = await getOccurrencesForScanLink(scanLink.id, {
-            limit: 1,
-            offset: 0,
-          });
+          const occ = await getOccurrencesForScanLinkForUser(
+            userId,
+            scanLink.id,
+            {
+              limit: 1,
+              offset: 0,
+            },
+          );
           const first = occ.occurrences[0];
           if (first) {
             await insertIgnoredOccurrence({
@@ -1633,7 +1929,12 @@ app.post(
           : mode === "site_rule_regex"
             ? "regex"
             : "contains";
-      const rule = await createIgnoreRule(run.site_id, ruleType, linkUrl);
+      const rule = await createIgnoreRule(
+        userId,
+        run.site_id,
+        ruleType,
+        linkUrl,
+      );
       await applyIgnoreRulesForScanRun(scanRunId, { force: true });
       return res.json({ scanRunId, link_url: linkUrl, rule });
     } catch (err: unknown) {
@@ -1664,23 +1965,17 @@ app.post(
     }
 
     try {
-      const run = await getScanRunById(scanRunId);
-      if (!run)
-        return sendApiError(
-          res,
-          404,
-          "scan_run_not_found",
-          "Scan run not found",
-        );
+      const runCheck = await requireScanRunForUser(req, res, scanRunId);
+      if (!runCheck) return;
+      const { run } = runCheck;
+      const userId = req.user?.id;
+      if (!userId) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
 
-      const link = await getScanLinkById(scanLinkId);
+      const link = await getScanLinkByIdForUser(userId, scanLinkId);
       if (!link || link.scan_run_id !== scanRunId) {
-        return sendApiError(
-          res,
-          404,
-          "scan_link_not_found",
-          "Scan link not found",
-        );
+        return sendNotFound(res);
       }
 
       if (mode === "this_scan") {
@@ -1695,7 +1990,7 @@ app.post(
           statusCode: link.status_code,
           errorMessage: link.error_message ?? undefined,
         });
-        const occ = await getOccurrencesForScanLink(link.id, {
+        const occ = await getOccurrencesForScanLinkForUser(userId, link.id, {
           limit: 1,
           offset: 0,
         });
@@ -1717,7 +2012,12 @@ app.post(
           : mode === "site_rule_regex"
             ? "regex"
             : "contains";
-      const rule = await createIgnoreRule(run.site_id, ruleType, link.link_url);
+      const rule = await createIgnoreRule(
+        userId,
+        run.site_id,
+        ruleType,
+        link.link_url,
+      );
       await applyIgnoreRulesForScanRun(scanRunId, { force: true });
       return res.json({ scanRunId, link_url: link.link_url, rule });
     } catch (err: unknown) {
@@ -1737,14 +2037,18 @@ app.post(
     const encodedLinkUrl = req.params.encodedLinkUrl;
     const linkUrl = decodeURIComponent(encodedLinkUrl);
     try {
-      const link = await getScanLinkByRunAndUrl(scanRunId, linkUrl);
-      if (!link)
-        return sendApiError(
-          res,
-          404,
-          "scan_link_not_found",
-          "Scan link not found",
-        );
+      const runCheck = await requireScanRunForUser(req, res, scanRunId);
+      if (!runCheck) return;
+      const userId = req.user?.id;
+      if (!userId) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
+      const link = await getScanLinkByRunAndUrlForUser(
+        userId,
+        scanRunId,
+        linkUrl,
+      );
+      if (!link) return sendNotFound(res);
       if (link.ignored_source !== "manual") {
         return sendApiError(
           res,
@@ -1771,6 +2075,8 @@ app.post("/scan-runs/:scanRunId/reapply-ignore", async (req, res) => {
   const scanRunId = req.params.scanRunId;
   const force = req.query.force === "true" || req.query.force === "1";
   try {
+    const runCheck = await requireScanRunForUser(req, res, scanRunId);
+    if (!runCheck) return;
     const result = await applyIgnoreRulesForScanRun(scanRunId, { force });
     res.json({ scanRunId, ...result });
   } catch (err: unknown) {
@@ -1785,14 +2091,15 @@ app.post(
     const scanRunId = req.params.scanRunId;
     const scanLinkId = req.params.scanLinkId;
     try {
-      const link = await getScanLinkById(scanLinkId);
+      const runCheck = await requireScanRunForUser(req, res, scanRunId);
+      if (!runCheck) return;
+      const userId = req.user?.id;
+      if (!userId) {
+        return sendApiError(res, 401, "unauthorized", "Unauthorized");
+      }
+      const link = await getScanLinkByIdForUser(userId, scanLinkId);
       if (!link || link.scan_run_id !== scanRunId) {
-        return sendApiError(
-          res,
-          404,
-          "scan_link_not_found",
-          "Scan link not found",
-        );
+        return sendNotFound(res);
       }
       if (link.ignored_source !== "manual") {
         return sendApiError(
@@ -1819,20 +2126,18 @@ app.post(
 // Delete a site (and its scans/results)
 app.delete("/sites/:siteId", async (req, res) => {
   const siteId = req.params.siteId;
-  const userId = (req.query.userId as string) ?? DEMO_USER_ID;
+  const userId = req.user?.id;
 
   try {
-    const site = await getSiteById(siteId);
-    if (!site || site.user_id !== userId) {
-      return sendApiError(
-        res,
-        404,
-        "site_not_found",
-        `No site found with id ${siteId}`,
-      );
+    if (!userId) {
+      return sendApiError(res, 401, "unauthorized", "Unauthorized");
+    }
+    const site = await getSiteByIdForUser(userId, siteId);
+    if (!site) {
+      return sendNotFound(res);
     }
 
-    const deleted = await deleteSite(siteId);
+    const deleted = await deleteSiteForUser(siteId, userId);
 
     if (!deleted) {
       return sendApiError(
@@ -1851,6 +2156,10 @@ app.delete("/sites/:siteId", async (req, res) => {
 });
 
 const PORT = Number(process.env.PORT) || 3001;
+
+void initEventRelay().catch((err) => {
+  console.error("Failed to start event relay", err);
+});
 
 app.listen(PORT, () => {
   console.log(`API listening on http://localhost:3001`);

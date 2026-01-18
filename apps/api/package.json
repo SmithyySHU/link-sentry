@@ -12,6 +12,8 @@
     "@link-sentry/db": "*",
     "cors": "^2.8.5",
     "express": "^4.21.2",
+    "express-rate-limit": "^7.4.0",
+    "iron-session": "^8.0.2",
     "nodemailer": "^6.9.14"
   },
   "devDependencies": {

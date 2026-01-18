@@ -1,4 +1,4 @@
-import { runScanForSite } from "./scanService.js";
+import { runScanForSite } from "./scanService";
 
 async function main(): Promise<void> {
   const siteId = "85efa142-35dc-4b06-93ee-fb7180ab28fd";

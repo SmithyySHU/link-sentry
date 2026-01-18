@@ -8,7 +8,7 @@ type EmailPayload = {
 };
 
 const EMAIL_ENABLED = process.env.EMAIL_ENABLED === "true";
-const EMAIL_FROM = process.env.EMAIL_FROM || "Link-Sentry <no-reply@local>";
+const EMAIL_FROM = process.env.EMAIL_FROM || "Scanlark <alerts@scanlark.local>";
 const SMTP_HOST = process.env.SMTP_HOST || "";
 const SMTP_PORT = process.env.SMTP_PORT ? Number(process.env.SMTP_PORT) : 587;
 const SMTP_USER = process.env.SMTP_USER || "";
